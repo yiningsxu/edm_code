@@ -1,0 +1,20 @@
+.Rproj.user/
+.Rhistory
+.RData
+.Ruserdata
+.DS_Store
+.idea/
+__pycache__/
+*.pyc
+
+# Analysis outputs can become large and are reproducible from scripts.
+result/
+results/
+output/
+outputs/
+figures/
+tables/
+
+# Keep local machine overrides out of version control.
+.env
+local_config.R
