@@ -95,7 +95,7 @@ process_df <- function(df, cause_var, effect_var) {
 }
 
 # ransom_seedを入れたmake_surrogate_seasonal()関数
-make_surrogate_seasonal_randomseed <- function(ts, num_surr = 100, T_period = 12, random_seed = NULL) {
+make_surrogate_seasonal_randomseed <- function(ts, num_surr = 100, T_period = 52, random_seed = NULL) {
   if (is.data.frame(ts)) {
     ts <- ts[[1]]
   }
