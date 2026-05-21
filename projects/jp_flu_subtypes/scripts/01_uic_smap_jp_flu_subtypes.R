@@ -1,4 +1,6 @@
 rm(list = ls())
+
+setwd("/Users/yining/Desktop/_GSAIS_/mzmtlab/microbiome dynamics/edm_code/projects/jp_flu_subtypes/scripts")
 # ---- edm_code bootstrap ----
 source_edm_bootstrap <- function() {
   current <- normalizePath(getwd(), winslash = "/", mustWork = TRUE)
@@ -16,6 +18,7 @@ source_edm_bootstrap <- function() {
   }
 }
 source_edm_bootstrap()
+setwd(workspace_root())
 rm(source_edm_bootstrap)
 # ----------------------------
 
@@ -61,51 +64,34 @@ print(paste("Global result save path:", res_save_path)) # check the path
 ## --------------------- Preparation --------------------- ##
 # 有意なUIC結果をまとめて出す関数
 process_df <- function(df, cause_var, effect_var) {
-  res_95 <- subset(df, pval < 0.05 & pval > quantile_95)
+  res_95 <- subset(df, pval < 0.05 & ete > quantile_95)
 
   if (nrow(res_95) > 0) {
     signif_res <- res_95
-    chosen_quantile <- "quantile_95"
+    weight <- 3
   } else {
-    res_90 <- subset(df, pval < 0.05 & pval > quantile_90)
+    res_90 <- subset(df, pval < 0.05 & ete > quantile_90)
     signif_res <- res_90
-    chosen_quantile <- "quantile_90"
+    weight <- 1
   }
 
   if (nrow(signif_res) == 0) {
     return(NULL)
   }
 
-  selected_idx <- which.max(signif_res$ete)
-  selected_row <- signif_res[selected_idx, ]
+  selected_row <- signif_res[which.max(signif_res$ete), ]
 
-  if (chosen_quantile == "quantile_95") {
-    summary_signif_res_one <- data.frame(
-      cause = cause_var,
-      effected = effect_var,
-      E = selected_row$E,
-      tp = selected_row$tp,
-      ete = selected_row$ete,
-      quantile_90 = selected_row$quantile_90,
-      quantile_95 = selected_row$quantile_95,
-      weight = 3, # pval > quantile_95
-      stringsAsFactors = FALSE
-    )
-  } else {
-    summary_signif_res_one <- data.frame(
-      cause = cause_var,
-      effected = effect_var,
-      E = selected_row$E,
-      tp = selected_row$tp,
-      ete = selected_row$ete,
-      quantile_90 = selected_row$quantile_90,
-      quantile_95 = selected_row$quantile_95,
-      weight = 1, # pval > quantile_90
-      stringsAsFactors = FALSE
-    )
-  }
-
-  return(summary_signif_res_one)
+  data.frame(
+    cause = cause_var,
+    effected = effect_var,
+    E = selected_row$E,
+    tp = selected_row$tp,
+    ete = selected_row$ete,
+    quantile_90 = selected_row$quantile_90,
+    quantile_95 = selected_row$quantile_95,
+    weight = weight,
+    stringsAsFactors = FALSE
+  )
 }
 
 # ransom_seedを入れたmake_surrogate_seasonal()関数
@@ -522,52 +508,52 @@ print(colnames(df_log))
 ## -------------------------- MDR S-map -------------------------- ##
 ## --------------------------------------------------------------- ##
 
-# data_4sp_std <- as.data.frame(apply(data_4sp, 2, function(x) as.numeric(scale(x))))
-# effect_var <- "Trachurus.japonicus"
-effected_var <- "A_H1N1"
-tp_range <- c(-12:0)
-E_range <- c(0:20)
-# Step. 1: Estimate optimal embeding dimension
-simp_x <- rUIC::simplex(df_log, lib_var = effected_var, E = E_range, tp = 1)
-(Ex <- simp_x[which.min(simp_x$rmse), "E"])
+# # data_4sp_std <- as.data.frame(apply(data_4sp, 2, function(x) as.numeric(scale(x))))
+# # effect_var <- "Trachurus.japonicus"
+# effected_var <- "A_H1N1"
+# tp_range <- c(-12:0)
+# E_range <- c(0:20)
+# # Step. 1: Estimate optimal embeding dimension
+# simp_x <- rUIC::simplex(df_log, lib_var = effected_var, E = E_range, tp = 1)
+# (Ex <- simp_x[which.min(simp_x$rmse), "E"])
 
-# Step 2: Perform UIC to detect causality
-uic_res <- uic_across(
-  df_log[, 2:ncol(df_log)],
-  effected_var,
-  E_range = E_range,
-  tp_range = tp_range,
-  silent = TRUE
-)
+# # Step 2: Perform UIC to detect causality
+# uic_res <- uic_across(
+#   df_log[, 2:ncol(df_log)],
+#   effected_var,
+#   E_range = E_range,
+#   tp_range = tp_range,
+#   silent = TRUE
+# )
 
-# Step 3: Make block to calculate multiview distance
-block_mvd <- make_block_mvd(
-  df[, 2:ncol(df)],
-  uic_res,
-  effected_var,
-  E_effect_var = Ex,
-  include_var = "strongest_only",
-  p_threshold = 0.05
-)
+# # Step 3: Make block to calculate multiview distance
+# block_mvd <- make_block_mvd(
+#   df[, 2:ncol(df)],
+#   uic_res,
+#   effected_var,
+#   E_effect_var = Ex,
+#   include_var = "strongest_only",
+#   p_threshold = 0.05
+# )
 
-# Step. 4: Compute multiview distance
-multiview_dist <- compute_mvd(block_mvd, effected_var, E = Ex, tp = 1)
-# as.matrix(dist(block_mvd))
+# # Step. 4: Compute multiview distance
+# multiview_dist <- compute_mvd(block_mvd, effected_var, E = Ex, tp = 1)
+# # as.matrix(dist(block_mvd))
 
-# Step. 5: Do MDR S-map
-mdr_res <- s_map_mdr(
-  block_mvd,
-  dist_w = multiview_dist,
-  # dist_w = as.matrix(dist(block_mvd)),
-  theta = 1,
-  # Check!
-  tp = 1,
-  regularized = FALSE,
-  lambda = 0,
-  # Check!
-  save_smap_coefficients = TRUE
-)
-mdr_res$stats
+# # Step. 5: Do MDR S-map
+# mdr_res <- s_map_mdr(
+#   block_mvd,
+#   dist_w = multiview_dist,
+#   # dist_w = as.matrix(dist(block_mvd)),
+#   theta = 1,
+#   # Check!
+#   tp = 1,
+#   regularized = FALSE,
+#   lambda = 0,
+#   # Check!
+#   save_smap_coefficients = TRUE
+# )
+# mdr_res$stats
 
 # 保存パスを作る
 ## figure save path
