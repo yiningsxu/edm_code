@@ -295,7 +295,9 @@ read_prepare_flu <- function(data_file, subtype_vars) {
 }
 
 df_log <- read_prepare_flu(config$data_file, config$subtype_vars)
-df_model <- df_log %>% select(-Date)
+df_model <- df_log %>%
+  dplyr::select(-Date) %>%
+  as.data.frame()
 vars <- names(df_model)
 
 save_csv(df_log, file.path(paths$tables, "prepared_log1p_timeseries.csv"))
@@ -333,7 +335,7 @@ run_uic_pair <- function(df_model, effect_var, cause_var, config, paths) {
   message("UIC: ", cause_var, " -> ", effect_var)
 
   obs <- rUIC::uic.optimal(
-    df_model,
+    as.data.frame(df_model),
     lib_var = effect_var,
     tar_var = cause_var,
     E = config$E_range,
@@ -342,8 +344,8 @@ run_uic_pair <- function(df_model, effect_var, cause_var, config, paths) {
     alpha = config$alpha
   ) %>%
     as_tibble() %>%
-    filter(.data$tp %in% config$tp_range) %>%
-    arrange(.data$tp)
+    filter(tp %in% config$tp_range) %>%
+    arrange(tp)
 
   if (!("ete" %in% names(obs))) {
     stop("rUIC::uic.optimal() output does not include 'ete'.", call. = FALSE)
@@ -369,7 +371,7 @@ run_uic_pair <- function(df_model, effect_var, cause_var, config, paths) {
   for (i in seq_len(config$num_surr)) {
     tmp <- data.frame(effect = effect_surr[, i], cause = df_model[[cause_var]])
     sres <- rUIC::uic.optimal(
-      tmp,
+      as.data.frame(tmp),
       lib_var = "effect",
       tar_var = "cause",
       E = config$E_range,
