@@ -422,6 +422,9 @@ config <- list(
   uic_internal_num_surr = env_int("FLU_SUBTYPE_UIC_INTERNAL_NUM_SURR", 1), # rUIC内部p値用。主判定には使わない
   season_period = env_int("FLU_SUBTYPE_SEASON_PERIOD", 52), # 季節周期
   random_seed = env_int("FLU_SUBTYPE_RANDOM_SEED", 1234), # 乱数シード
+  save_intermediate = env_logical("FLU_SUBTYPE_SAVE_INTERMEDIATE", TRUE), # 解析途中のcheckpoint保存
+  save_each_surrogate = env_logical("FLU_SUBTYPE_SAVE_EACH_SURROGATE", TRUE), # サロゲートごとのUIC結果を個別保存
+  checkpoint_every = env_int("FLU_SUBTYPE_CHECKPOINT_EVERY", 25), # サロゲート行列などの途中保存間隔
 
   # MDR S-map settings.
   smap_tp = env_int("FLU_SUBTYPE_SMAP_TP", 1), # S-map の予測ターゲットとなる時間ステップ
@@ -450,6 +453,7 @@ if (config$uic_internal_num_surr < 1) stop("config$uic_internal_num_surr must be
 if (config$n_ssr < 1) stop("config$n_ssr must be >= 1.", call. = FALSE)
 if (config$k < 1) stop("config$k must be >= 1.", call. = FALSE)
 if (config$alpha <= 0 || config$alpha > 1) stop("config$alpha must be in (0, 1].", call. = FALSE)
+if (config$checkpoint_every < 1) stop("config$checkpoint_every must be >= 1.", call. = FALSE)
 log_msg("Input file: ", config$data_file)
 log_msg("Subtypes: ", paste(config$subtype_vars, collapse = ", "))
 log_msg(
@@ -457,6 +461,11 @@ log_msg(
   ", tp = ", paste(range(config$tp_range), collapse = " to "),
   ", seasonal surrogates = ", config$num_surr,
   ", rUIC internal surrogates = ", config$uic_internal_num_surr
+)
+log_msg(
+  "Intermediate saving: save_intermediate = ", config$save_intermediate,
+  ", save_each_surrogate = ", config$save_each_surrogate,
+  ", checkpoint_every = ", config$checkpoint_every
 )
 log_msg(
   "MDR settings: mdr_E = ", config$mdr_E,
@@ -478,7 +487,11 @@ paths <- list(
   root = safe_dir(config$out_dir),
   tables = safe_dir(file.path(config$out_dir, "tables")),
   uic_tables = safe_dir(file.path(config$out_dir, "tables", "uic")),
+  uic_surrogate_tables = safe_dir(file.path(config$out_dir, "tables", "uic", "surrogate_runs")),
   mdr_tables = safe_dir(file.path(config$out_dir, "tables", "mdr_smap")),
+  checkpoints = safe_dir(file.path(config$out_dir, "checkpoints")),
+  uic_checkpoints = safe_dir(file.path(config$out_dir, "checkpoints", "uic")),
+  mdr_checkpoints = safe_dir(file.path(config$out_dir, "checkpoints", "mdr_smap")),
   fig = safe_dir(file.path(config$out_dir, "figures")),
   uic_fig = safe_dir(file.path(config$out_dir, "figures", "uic")),
   mdr_fig = safe_dir(file.path(config$out_dir, "figures", "mdr_smap")),
@@ -489,11 +502,13 @@ log_msg("Tables: ", normalizePath(paths$tables, winslash = "/", mustWork = FALSE
 log_msg("Figures: ", normalizePath(paths$fig, winslash = "/", mustWork = FALSE))
 
 save_csv <- function(x, path) {
+  dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
   readr::write_csv(x, path, na = "")
   invisible(path)
 }
 
 save_rds <- function(x, path) {
+  dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
   saveRDS(x, path)
   invisible(path)
 }
@@ -679,6 +694,12 @@ run_uic_pair <- function(df_model, effect_var, cause_var, config, paths, pair_id
     ""
   }
   log_msg("UIC started: ", pair_prefix, cause_var, " -> ", effect_var)
+  tag <- paste0(cause_var, "_to_", effect_var)
+  pair_checkpoint_dir <- safe_dir(file.path(paths$uic_checkpoints, tag))
+  surrogate_run_dir <- safe_dir(file.path(paths$uic_surrogate_tables, tag))
+  surrogate_file_id <- function(i) {
+    sprintf(paste0("%0", nchar(as.character(config$num_surr)), "d"), i)
+  }
 
   obs <- run_uic_grid(
     block = df_model,
@@ -703,6 +724,10 @@ run_uic_pair <- function(df_model, effect_var, cause_var, config, paths, pair_id
   if (!("pval" %in% names(obs))) {
     obs <- obs %>% mutate(pval = NA_real_)
   }
+  if (isTRUE(config$save_intermediate)) {
+    save_csv(obs, file.path(pair_checkpoint_dir, paste0(tag, "_observed_uic.csv")))
+    log_msg("Saved observed UIC checkpoint for ", tag)
+  }
   obs_best <- obs %>%
     arrange(desc(.data$ete)) %>%
     slice(1)
@@ -723,6 +748,12 @@ run_uic_pair <- function(df_model, effect_var, cause_var, config, paths, pair_id
     seed = config$random_seed
   )
   log_msg("Seasonal surrogate matrix created: ", nrow(effect_surr), " x ", ncol(effect_surr))
+  if (isTRUE(config$save_intermediate)) {
+    effect_surr_tbl <- tibble(time = seq_len(nrow(effect_surr))) %>%
+      bind_cols(as_tibble(effect_surr, .name_repair = "minimal"))
+    save_csv(effect_surr_tbl, file.path(pair_checkpoint_dir, paste0(tag, "_seasonal_surrogate_series.csv")))
+    log_msg("Saved seasonal surrogate series checkpoint for ", tag)
+  }
 
   surr_ete <- matrix(NA_real_, nrow = nrow(obs), ncol = config$num_surr)
   rownames(surr_ete) <- paste0("tp_", obs$tp)
@@ -743,6 +774,38 @@ run_uic_pair <- function(df_model, effect_var, cause_var, config, paths, pair_id
     ) %>%
       dplyr::select(tp, ete)
     surr_ete[, i] <- sres$ete[match(obs$tp, sres$tp)]
+    if (isTRUE(config$save_each_surrogate)) {
+      sres_out <- sres %>%
+        mutate(
+          surrogate_id = i,
+          effect_var = effect_var,
+          cause_var = cause_var,
+          edge_tag = tag
+        ) %>%
+        relocate(surrogate_id, effect_var, cause_var, edge_tag)
+      save_csv(
+        sres_out,
+        file.path(surrogate_run_dir, paste0("surrogate_", surrogate_file_id(i), "_uic.csv"))
+      )
+    }
+    if (isTRUE(config$save_intermediate) && (i %% config$checkpoint_every == 0 || i == config$num_surr)) {
+      completed_matrix <- surr_ete[, seq_len(i), drop = FALSE]
+      completed_tbl <- tibble(tp = obs$tp) %>%
+        bind_cols(as_tibble(completed_matrix, .name_repair = "minimal"))
+      progress_tbl <- tibble(
+        effect_var = effect_var,
+        cause_var = cause_var,
+        edge_tag = tag,
+        completed_surrogates = i,
+        total_surrogates = config$num_surr,
+        elapsed = format_elapsed(pair_start),
+        saved_at = as.character(Sys.time())
+      )
+      save_csv(completed_tbl, file.path(pair_checkpoint_dir, paste0(tag, "_surrogate_ete_matrix_checkpoint_latest.csv")))
+      save_csv(completed_tbl, file.path(pair_checkpoint_dir, paste0(tag, "_surrogate_ete_matrix_after_", surrogate_file_id(i), ".csv")))
+      save_csv(progress_tbl, file.path(pair_checkpoint_dir, paste0(tag, "_surrogate_progress_latest.csv")))
+      log_msg("Saved surrogate checkpoint for ", tag, ": ", i, "/", config$num_surr)
+    }
     if (i %in% surr_progress) {
       log_msg(
         "Surrogate UIC progress for ", cause_var, " -> ", effect_var,
@@ -790,7 +853,6 @@ run_uic_pair <- function(df_model, effect_var, cause_var, config, paths, pair_id
     ", global significant tp = ", sum(res$sig_global, na.rm = TRUE)
   )
 
-  tag <- paste0(cause_var, "_to_", effect_var)
   save_csv(res, file.path(paths$uic_tables, paste0(tag, "_uic_surrogate_corrected.csv")))
   save_csv(as.data.frame(surr_ete), file.path(paths$uic_tables, paste0(tag, "_surrogate_ete_matrix.csv")))
   log_msg("Saved UIC tables for ", tag)
@@ -826,8 +888,9 @@ uic_pair_grid <- tidyr::crossing(effect_var = vars, cause_var = vars) %>%
   filter(.data$effect_var != .data$cause_var)
 log_msg("UIC pair plan: ", nrow(uic_pair_grid), " directed subtype pairs")
 
-uic_all <- purrr::map_dfr(seq_len(nrow(uic_pair_grid)), function(i) {
-  run_uic_pair(
+uic_results_list <- vector("list", nrow(uic_pair_grid))
+for (i in seq_len(nrow(uic_pair_grid))) {
+  uic_results_list[[i]] <- run_uic_pair(
     df_model = df_model,
     effect_var = uic_pair_grid$effect_var[[i]],
     cause_var = uic_pair_grid$cause_var[[i]],
@@ -836,7 +899,18 @@ uic_all <- purrr::map_dfr(seq_len(nrow(uic_pair_grid)), function(i) {
     pair_id = i,
     total_pairs = nrow(uic_pair_grid)
   )
-})
+  if (isTRUE(config$save_intermediate)) {
+    uic_partial <- bind_rows(uic_results_list[seq_len(i)])
+    save_csv(uic_partial, file.path(paths$uic_checkpoints, "uic_all_pairs_raw_partial_latest.csv"))
+    save_csv(
+      uic_partial,
+      file.path(paths$uic_checkpoints, paste0("uic_all_pairs_raw_partial_after_pair_", sprintf("%02d", i), ".csv"))
+    )
+    log_msg("Saved cumulative raw UIC checkpoint after pair ", i, "/", nrow(uic_pair_grid))
+  }
+}
+uic_all <- bind_rows(uic_results_list)
+rm(uic_results_list)
 
 log_msg("Applying FDR correction across all UIC lag results")
 uic_all <- uic_all %>%
@@ -845,6 +919,10 @@ uic_all <- uic_all %>%
     p_emp_fdr = p.adjust(.data$p_emp, method = "BH"),
     sig_primary = .data$p_global_fdr < config$alpha & .data$ete > .data$q95_global
   )
+if (isTRUE(config$save_intermediate)) {
+  save_csv(uic_all, file.path(paths$uic_checkpoints, "uic_all_pairs_fdr_corrected_checkpoint.csv"))
+  log_msg("Saved FDR-corrected all-pair UIC checkpoint")
+}
 
 save_csv(uic_all, file.path(paths$tables, "uic_all_pairs_surrogate_corrected.csv"))
 log_msg("Saved all-pair UIC table: ", file.path(paths$tables, "uic_all_pairs_surrogate_corrected.csv"))
@@ -864,6 +942,9 @@ selected_links <- uic_all %>%
   )
 
 save_csv(selected_links, file.path(paths$tables, "uic_selected_links_for_MDR.csv"))
+if (isTRUE(config$save_intermediate)) {
+  save_csv(selected_links, file.path(paths$uic_checkpoints, "uic_selected_links_for_MDR_checkpoint.csv"))
+}
 log_msg("Selected UIC links entering MDR: ", nrow(selected_links))
 if (nrow(selected_links) > 0) {
   print(selected_links %>% select(effect_var, cause_var, tp, lag_weeks, ete, p_global_fdr))
@@ -1049,7 +1130,9 @@ run_mdr_for_effect <- function(effect_var, selected_links, df_model, df_log, con
     ": ", nrow(param_grid), " parameter combinations"
   )
 
-  param_res <- purrr::map_dfr(seq_len(nrow(param_grid)), function(param_id) {
+  effect_checkpoint_dir <- safe_dir(file.path(paths$mdr_checkpoints, effect_var))
+  param_results <- vector("list", nrow(param_grid))
+  for (param_id in seq_len(nrow(param_grid))) {
     theta <- param_grid$theta[[param_id]]
     lambda <- param_grid$lambda[[param_id]]
     log_msg(
@@ -1069,15 +1152,27 @@ run_mdr_for_effect <- function(effect_var, selected_links, df_model, df_log, con
       random_seed = config$random_seed
     )
     fit_stats <- as_tibble(fit$stats) %>% mutate(theta = theta, lambda = lambda)
+    param_results[[param_id]] <- fit_stats
     log_msg(
       "MDR parameter result ", effect_var,
       ": theta = ", theta,
       ", rho = ", signif(fit_stats$rho[[1]], 4),
       ", rmse = ", signif(fit_stats$rmse[[1]], 4)
     )
-    fit_stats
-  }) %>%
+    if (isTRUE(config$save_intermediate)) {
+      save_csv(
+        fit_stats,
+        file.path(effect_checkpoint_dir, paste0(effect_var, "_MDR_parameter_", sprintf("%03d", param_id), ".csv"))
+      )
+      param_partial <- bind_rows(param_results[seq_len(param_id)]) %>%
+        select(any_of(c("N", "theta", "lambda", "rho", "mae", "rmse")), everything())
+      save_csv(param_partial, file.path(effect_checkpoint_dir, paste0(effect_var, "_MDR_parameter_search_partial_latest.csv")))
+      log_msg("Saved MDR parameter-search checkpoint for ", effect_var, ": ", param_id, "/", nrow(param_grid))
+    }
+  }
+  param_res <- bind_rows(param_results) %>%
     select(any_of(c("N", "theta", "lambda", "rho", "mae", "rmse")), everything())
+  rm(param_results)
 
   save_csv(param_res, file.path(paths$mdr_tables, paste0(effect_var, "_MDR_parameter_search.csv")))
   log_msg("Saved MDR parameter search table for ", effect_var)
