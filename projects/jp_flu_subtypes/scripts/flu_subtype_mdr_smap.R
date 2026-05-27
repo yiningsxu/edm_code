@@ -156,17 +156,16 @@ config <- list(
   mdr_include_var = "strongest_only", # 各効果変数に対して、UICで最も強い関係を示した原因変数だけを MDR S-map に入れる設定
   mdr_E = 3, # MDR S-map に使用する埋め込み次元：状態空間を構成する際に3次元の情報を使う
   n_ssr = 2000, # サロゲートデータの数
-  k = NULL, # if NULL, floor(sqrt(n_ssr)) is used.
+  k = NULL, # if NULL, floor(sqrt(n_ssr)) is used. 近傍点数？
   theta_grid = c(
     0, 1e-4, 3e-4, 1e-3, 3e-3, 1e-2, 3e-2,
     0.1, 0.3, 0.5, 0.75, 1, 1.5, 2, 3, 4, 6, 8
-  ),
+  ), # 拡散係数のグリッド値、S-mapでは、theta が大きいほど、近い状態にある点を重視する局所モデルになる
 
-  # Set TRUE only if you want ridge-regularized MDR S-map as a sensitivity analysis.
-  # For a clean MDR S-map primary analysis, FALSE is the more direct specification.
-  ridge_regularized_mdr = FALSE,
-  lambda_grid = c(0),
-  alpha_glmnet = 0,
+  # 正則化付き MDR S-map を使うかどうか。感度分析として、TRUE のままで解析を進めることも可能
+  ridge_regularized_mdr = FALSE, # 主解析は使わない
+  lambda_grid = c(0), # 正則化の強さのグリッド値。0は正則化なし
+  alpha_glmnet = 0, # alpha = 0：Ridge, alpha = 1：Lasso, 0 < alpha < 1：Elastic Net
 
   # Figure export.
   dpi = 300,
@@ -213,6 +212,7 @@ subtype_label <- function(x) {
   )
 }
 
+# 因果方向・影響方向のラベルを作る関数
 edge_label <- function(cause, effect, lag_weeks = NULL) {
   base <- paste0(subtype_label(cause), " \u2192 ", subtype_label(effect))
   if (is.null(lag_weeks)) {
@@ -242,29 +242,55 @@ read_prepare_flu <- function(data_file, subtype_vars) {
   }
 
   raw <- read.csv(data_file, check.names = FALSE)
+
   required <- c("year", "week", subtype_vars)
   missing <- setdiff(required, names(raw))
   if (length(missing) > 0) {
     stop("Missing required columns: ", paste(missing, collapse = ", "), call. = FALSE)
   }
 
-  tmp <- raw %>%
-    mutate(
-      Date = ISOweek::ISOweek2date(paste0(.data$year, "-W", sprintf("%02d", .data$week), "-1")),
-      Date = as.Date(.data$Date)
-    ) %>%
-    arrange(.data$Date)
+  raw$Date <- ISOweek::ISOweek2date(
+    paste0(
+      raw$year,
+      "-W",
+      sprintf("%02d", as.integer(raw$week)),
+      "-1"
+    )
+  )
 
-  out <- data.frame(Date = tmp$Date)
+  raw$Date <- as.Date(raw$Date)
+  raw <- raw[order(raw$Date), ]
+
+  out <- data.frame(Date = raw$Date)
+
   for (v in subtype_vars) {
-    out[[v]] <- log(as.numeric(tmp[[v]]) + 1)
+    x <- suppressWarnings(as.numeric(raw[[v]]))
+
+    if (anyNA(x)) {
+      stop(
+        "Subtype variable contains non-numeric or missing values: ",
+        v,
+        call. = FALSE
+      )
+    }
+
+    out[[v]] <- log(x + 1)
   }
 
-  keep <- c(TRUE, vapply(out[subtype_vars], function(x) sum(x, na.rm = TRUE) > 0, logical(1)))
+  keep <- c(
+    TRUE,
+    vapply(out[subtype_vars], function(x) sum(x, na.rm = TRUE) > 0, logical(1))
+  )
+
   out <- out[, keep, drop = FALSE]
+
   if (anyNA(out)) {
-    stop("Prepared data contains NA values. Please inspect missing weeks or subtype values.", call. = FALSE)
+    stop(
+      "Prepared data contains NA values. Please inspect missing weeks or subtype values.",
+      call. = FALSE
+    )
   }
+
   out
 }
 
