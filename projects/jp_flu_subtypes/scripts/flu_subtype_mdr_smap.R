@@ -12,102 +12,247 @@
 #   Required columns: year, week, B, A_H1N1, A_H3N2
 #
 # Notes:
-#   - Run from the project root where data/ and result/ exist.
-#   - For a quick dry run, set config$num_surr <- 50. For final results use 2000.
-#   - MDR functions are taken from either macamts or macam, whichever is installed.
+#   - Run with Rscript or source() from anywhere inside the edm_code workspace.
+#   - For a quick dry run, use environment variables such as
+#     FLU_SUBTYPE_NUM_SURR=10 FLU_SUBTYPE_N_SSR=50 FLU_SUBTYPE_E_RANGE=1:5.
+#   - MDR distance and S-map functions are taken from either macam or macamts.
 
 rm(list = ls())
 
 # -----------------------------
 # 0. Bootstrap and packages
 # -----------------------------
-setwd("~/Desktop/_GSAIS_/mzmtlab/microbiome dynamics/edm_code/projects/jp_flu_subtypes/scripts")
-# ---- edm_code bootstrap ----
-source_edm_bootstrap <- function() {
-  current <- normalizePath(getwd(), winslash = "/", mustWork = TRUE)
-  repeat {
-    bootstrap <- file.path(current, "R", "bootstrap.R")
-    if (file.exists(bootstrap)) {
-      source(bootstrap)
-      return(source_edm_paths(current))
+current_script_dir <- function() {
+  args <- commandArgs(trailingOnly = FALSE)
+  file_arg <- args[startsWith(args, "--file=")][1]
+  if (!is.na(file_arg)) {
+    file_arg <- sub("^--file=", "", file_arg)
+    if (file.exists(file_arg)) {
+      return(dirname(normalizePath(file_arg, winslash = "/", mustWork = TRUE)))
     }
-    parent <- dirname(current)
-    if (identical(parent, current)) {
-      stop("Could not find edm_code/R/bootstrap.R. Run this script from inside edm_code.", call. = FALSE)
-    }
-    current <- parent
   }
+
+  for (frame in rev(sys.frames())) {
+    ofile <- frame$ofile
+    if (!is.null(ofile) && nzchar(ofile) && file.exists(ofile)) {
+      return(dirname(normalizePath(ofile, winslash = "/", mustWork = TRUE)))
+    }
+  }
+
+  NA_character_
+}
+
+# ---- edm_code bootstrap ----
+source_edm_bootstrap <- function(start_dirs = c(current_script_dir(), getwd())) {
+  start_dirs <- unique(start_dirs[!is.na(start_dirs) & nzchar(start_dirs)])
+
+  for (start_dir in start_dirs) {
+    current <- normalizePath(start_dir, winslash = "/", mustWork = TRUE)
+    repeat {
+      bootstrap <- file.path(current, "R", "bootstrap.R")
+      if (file.exists(bootstrap)) {
+        source(bootstrap)
+        return(source_edm_paths(current))
+      }
+      parent <- dirname(current)
+      if (identical(parent, current)) {
+        break
+      }
+      current <- parent
+    }
+  }
+
+  stop("Could not find edm_code/R/bootstrap.R. Run this script from inside edm_code.", call. = FALSE)
 }
 source_edm_bootstrap()
 setwd(workspace_root())
-rm(source_edm_bootstrap)
+rm(source_edm_bootstrap, current_script_dir)
 
-if (!requireNamespace("pacman", quietly = TRUE)) install.packages("pacman")
-pacman::p_load(
-  dplyr, # データ加工
-  tidyr, # データの縦横変換
-  purrr, # 関数型処理、反復処理
-  tibble, # データフレームの拡張
-  readr, # csvなどの読み込み
-  stringr, # 文字列処理
-  forcats, # カテゴリ変数の処理
-  scales, # ggplot の軸・ラベル調整
-  lubridate, # 日付・時刻の操作
-  ISOweek, # ISO週番号の計算
-  ggplot2, # グラフ作成
-  cowplot, # 複数図の結合
-  sinaplot, # データの分布プロット（バイオリンプロット＋点プロット）
-  rUIC, # Unified Information Criterion 関連
-  rEDM, # Empirical Dynamic Modeling
-  grid # 図の細かい制御
+required_packages <- c(
+  "dplyr", # データ加工
+  "tidyr", # データの縦横変換
+  "purrr", # 関数型処理、反復処理
+  "tibble", # データフレームの拡張
+  "readr", # csvなどの読み込み
+  "stringr", # 文字列処理
+  "forcats", # カテゴリ変数の処理
+  "scales", # ggplot の軸・ラベル調整
+  "lubridate", # 日付・時刻の操作
+  "ISOweek", # ISO週番号の計算
+  "ggplot2", # グラフ作成
+  "cowplot", # 複数図の結合
+  "ggforce", # sina plot layer
+  "rUIC", # Unified Information Criterion 関連
+  "rEDM", # Empirical Dynamic Modeling
+  "grid" # 図の細かい制御
 )
-# Load library
-packageVersion("rEDM") # v 0.7.5
-packageVersion("macamts") # v 0.1.4
-packageVersion("rUIC") # v 0.9.12
+missing_packages <- required_packages[
+  !vapply(required_packages, requireNamespace, quietly = TRUE, FUN.VALUE = logical(1))
+]
+if (length(missing_packages) > 0) {
+  stop(
+    "Missing required R package(s): ",
+    paste(missing_packages, collapse = ", "),
+    ". Install them before running this pipeline.",
+    call. = FALSE
+  )
+}
+invisible(lapply(required_packages, library, character.only = TRUE))
+# Keep dplyr at the front of the search path so unqualified verbs retain
+# dplyr semantics even if an attached dependency masks them.
+if ("package:dplyr" %in% search()) {
+  detach("package:dplyr", unload = FALSE, character.only = TRUE)
+}
+suppressPackageStartupMessages(library(dplyr, warn.conflicts = FALSE))
+rm(required_packages, missing_packages)
+
+message("rEDM version: ", as.character(utils::packageVersion("rEDM")))
+message("rUIC version: ", as.character(utils::packageVersion("rUIC")))
 
 resolve_mdr_pkg <- function() {
-  candidates <- c("macamts", "macam")
+  candidates <- c("macam", "macamts")
   for (pkg in candidates) {
-    if (requireNamespace(pkg, quietly = TRUE)) {
+    has_namespace <- requireNamespace(pkg, quietly = TRUE)
+    has_functions <- has_namespace &&
+      all(c("compute_mvd", "s_map_mdr") %in% getNamespaceExports(pkg))
+    if (has_functions) {
       return(pkg)
     }
   }
   stop(
-    "Neither 'macamts' nor 'macam' is installed. Install one of them, e.g. remotes::install_github('ong8181/macam').",
+    "Neither 'macam' nor 'macamts' with compute_mvd() and s_map_mdr() is installed. ",
+    "Install one of them, e.g. remotes::install_github('ong8181/macam').",
     call. = FALSE
   )
 }
 
 mdr_pkg <- resolve_mdr_pkg()
-message("Using MDR package: ", mdr_pkg)
+message("Using MDR package: ", mdr_pkg, " ", as.character(utils::packageVersion(mdr_pkg)))
 
 mdr_fun <- function(fun) {
   getExportedValue(mdr_pkg, fun)
 }
 
-# Compatibility wrapper: macam/macamts >= 0.2.2 uses max_lag; older macamts uses E_effect_var.
-# バージョン差を吸収する wrapper
-make_block_mvd_compat <- function(block, uic_res, effect_var, max_lag, ...) {
-  f <- mdr_fun("make_block_mvd")
+# Local make_block_mvd wrapper.
+# The installed macam/macamts versions in this workspace do not expose tp_adjust,
+# but tp_adjust is needed to align a one-step MDR S-map target with UIC lags.
+make_block_mvd_compat <- function(block,
+                                  uic_res,
+                                  effect_var,
+                                  max_lag,
+                                  cause_var_colname = "cause_var",
+                                  include_var = "strongest_only",
+                                  p_threshold = 0.05,
+                                  tp_adjust = 0,
+                                  sort_tp = TRUE,
+                                  silent = FALSE,
+                                  ...) {
   dots <- list(...)
-  formal_names <- names(formals(f))
-
-  args <- c(list(block = block, uic_res = uic_res, effect_var = effect_var), dots)
-  if (!is.null(dots$tp_adjust) && !("tp_adjust" %in% formal_names)) {
-    warning("Installed make_block_mvd() has no tp_adjust argument. UIC lag and one-step MDR target may be offset by one week. Update macam/macamts if possible.")
+  if (length(dots) > 0) {
+    warning("Unused make_block_mvd_compat() argument(s): ", paste(names(dots), collapse = ", "))
   }
-  if ("max_lag" %in% formal_names) {
-    args$max_lag <- max_lag
-  } else if ("E_effect_var" %in% formal_names) {
-    args$E_effect_var <- max_lag
+
+  block <- as.data.frame(block)
+  uic_res <- as.data.frame(uic_res)
+  x_names <- colnames(block)
+
+  if (is.numeric(effect_var)) {
+    effect_var <- x_names[effect_var]
+  }
+  if (!(effect_var %in% x_names)) {
+    stop("No effect_var in the block: ", effect_var, call. = FALSE)
+  }
+  if (!all(unique(x_names) == x_names)) {
+    stop("block must have unique column names.", call. = FALSE)
+  }
+  if (!include_var %in% c("all_significant", "strongest_only", "tp0_only")) {
+    stop("include_var must be all_significant, strongest_only, or tp0_only.", call. = FALSE)
+  }
+  if (!is.numeric(max_lag) || length(max_lag) != 1 || max_lag < 1) {
+    stop("max_lag must be a single number >= 1.", call. = FALSE)
+  }
+
+  required_uic_cols <- c(cause_var_colname, "tp", "te", "pval")
+  missing_uic_cols <- setdiff(required_uic_cols, colnames(uic_res))
+  if (length(missing_uic_cols) > 0) {
+    stop("uic_res is missing required column(s): ", paste(missing_uic_cols, collapse = ", "), call. = FALSE)
+  }
+
+  max_lag <- as.integer(max_lag)
+  tp_adjust <- as.integer(tp_adjust)
+
+  if (include_var == "tp0_only") {
+    block_mvd <- data.frame(block[[effect_var]])
+    colnames(block_mvd) <- sprintf("%s_tp0", effect_var)
   } else {
-    warning("make_block_mvd() has neither max_lag nor E_effect_var; using package default for effect-variable lags.")
+    block_mvd <- data.frame(rEDM::make_block(block[[effect_var]], max_lag = max_lag)[, -1, drop = FALSE])
+    colnames(block_mvd) <- sprintf("%s_tp%s", effect_var, 0:(-(max_lag - 1)))
   }
 
-  # Drop arguments unsupported by the installed package version.
-  args <- args[names(args) %in% formal_names]
-  do.call(f, args)
+  if (!silent) {
+    message(sprintf(
+      "UIC rows with tp <= 0 and pval <= %s are kept; cause tp is adjusted by %+d for MDR.",
+      p_threshold,
+      tp_adjust
+    ))
+  }
+
+  uic_res <- uic_res[is.finite(uic_res$pval) & uic_res$pval <= p_threshold & uic_res$tp <= 0, , drop = FALSE]
+  if (nrow(uic_res) < 1) {
+    stop("No significant causal variables were detected. Please use the univariate S-map.", call. = FALSE)
+  }
+
+  if (sort_tp) {
+    uic_res <- uic_res %>%
+      dplyr::group_by(.data[[cause_var_colname]]) %>%
+      dplyr::arrange(dplyr::desc(.data$tp), .by_group = TRUE) %>%
+      dplyr::ungroup() %>%
+      as.data.frame()
+  }
+
+  if (include_var == "strongest_only") {
+    uic_res <- uic_res %>%
+      dplyr::group_by(.data[[cause_var_colname]]) %>%
+      dplyr::arrange(dplyr::desc(.data$te), .by_group = TRUE) %>%
+      dplyr::slice(1) %>%
+      dplyr::ungroup() %>%
+      as.data.frame()
+  }
+
+  if (include_var == "tp0_only") {
+    for (cause_i in unique(uic_res[[cause_var_colname]])) {
+      if (!(cause_i %in% x_names)) {
+        stop("UIC cause variable is not in block: ", cause_i, call. = FALSE)
+      }
+      block_mvd[[sprintf("%s_tp0", cause_i)]] <- block[[cause_i]]
+    }
+    return(block_mvd)
+  }
+
+  for (i in seq_len(nrow(uic_res))) {
+    cause_i <- uic_res[[cause_var_colname]][i]
+    if (!(cause_i %in% x_names)) {
+      stop("UIC cause variable is not in block: ", cause_i, call. = FALSE)
+    }
+
+    adjusted_tp <- as.integer(uic_res$tp[i]) + tp_adjust
+    if (adjusted_tp > 0) {
+      stop(
+        "Adjusted cause tp became positive for ", cause_i, " -> ", effect_var,
+        " (UIC tp = ", uic_res$tp[i], ", tp_adjust = ", tp_adjust, ").",
+        call. = FALSE
+      )
+    }
+
+    block_new <- if (adjusted_tp == 0) {
+      block[[cause_i]]
+    } else {
+      dplyr::lag(block[[cause_i]], n = abs(adjusted_tp))
+    }
+    block_mvd[[sprintf("%s_tp%s", cause_i, adjusted_tp)]] <- block_new
+  }
+
+  block_mvd
 }
 
 call_mdr_function <- function(fun, ...) {
@@ -134,49 +279,196 @@ s_map_mdr_compat <- function(...) {
   call_mdr_function("s_map_mdr", ...)
 }
 
+analysis_start_time <- Sys.time()
+
+log_msg <- function(..., level = "INFO") {
+  stamp <- format(Sys.time(), "%Y-%m-%d %H:%M:%S")
+  print(paste0("[", stamp, "] [", level, "] ", paste0(..., collapse = "")))
+  flush.console()
+}
+
+log_section <- function(title) {
+  print("")
+  log_msg("==== ", title, " ====")
+}
+
+format_elapsed <- function(start_time) {
+  secs <- as.numeric(difftime(Sys.time(), start_time, units = "secs"))
+  if (!is.finite(secs)) {
+    return("unknown")
+  }
+  if (secs < 60) {
+    return(paste0(round(secs, 1), " sec"))
+  }
+  if (secs < 3600) {
+    return(paste0(round(secs / 60, 1), " min"))
+  }
+  paste0(round(secs / 3600, 2), " hr")
+}
+
+progress_points <- function(total, n = 10) {
+  if (total <= 0) {
+    return(integer(0))
+  }
+  sort(unique(pmax(1L, pmin(total, round(seq(1, total, length.out = min(n, total)))))))
+}
+
 # -----------------------------
 # 1. Configuration
 # -----------------------------
+log_section("1. Configuration")
+
+env_chr <- function(name, default) {
+  value <- Sys.getenv(name, unset = NA_character_)
+  if (is.na(value) || !nzchar(value)) {
+    return(default)
+  }
+  value
+}
+
+env_int <- function(name, default) {
+  value <- Sys.getenv(name, unset = NA_character_)
+  if (is.na(value) || !nzchar(value)) {
+    return(default)
+  }
+  out <- suppressWarnings(as.integer(value))
+  if (is.na(out)) {
+    stop("Environment variable ", name, " must be an integer.", call. = FALSE)
+  }
+  out
+}
+
+env_num <- function(name, default) {
+  value <- Sys.getenv(name, unset = NA_character_)
+  if (is.na(value) || !nzchar(value)) {
+    return(default)
+  }
+  out <- suppressWarnings(as.numeric(value))
+  if (is.na(out)) {
+    stop("Environment variable ", name, " must be numeric.", call. = FALSE)
+  }
+  out
+}
+
+env_int_nullable <- function(name, default = NULL) {
+  value <- Sys.getenv(name, unset = NA_character_)
+  if (is.na(value) || !nzchar(value)) {
+    return(default)
+  }
+  out <- suppressWarnings(as.integer(value))
+  if (is.na(out)) {
+    stop("Environment variable ", name, " must be an integer.", call. = FALSE)
+  }
+  out
+}
+
+env_int_vector <- function(name, default) {
+  value <- Sys.getenv(name, unset = NA_character_)
+  if (is.na(value) || !nzchar(value)) {
+    return(default)
+  }
+  value <- gsub("\\s+", "", value)
+  if (grepl("^-?[0-9]+:-?[0-9]+$", value)) {
+    bounds <- as.integer(strsplit(value, ":", fixed = TRUE)[[1]])
+    return(seq(bounds[1], bounds[2]))
+  }
+  out <- suppressWarnings(as.integer(strsplit(value, ",", fixed = TRUE)[[1]]))
+  if (anyNA(out)) {
+    stop("Environment variable ", name, " must be an integer range such as 1:5 or a comma-separated integer list.", call. = FALSE)
+  }
+  out
+}
+
+env_num_vector <- function(name, default) {
+  value <- Sys.getenv(name, unset = NA_character_)
+  if (is.na(value) || !nzchar(value)) {
+    return(default)
+  }
+  out <- suppressWarnings(as.numeric(strsplit(gsub("\\s+", "", value), ",", fixed = TRUE)[[1]]))
+  if (anyNA(out)) {
+    stop("Environment variable ", name, " must be a comma-separated numeric list.", call. = FALSE)
+  }
+  out
+}
+
+env_logical <- function(name, default) {
+  value <- tolower(Sys.getenv(name, unset = NA_character_))
+  if (is.na(value) || !nzchar(value)) {
+    return(default)
+  }
+  if (value %in% c("true", "t", "1", "yes", "y")) {
+    return(TRUE)
+  }
+  if (value %in% c("false", "f", "0", "no", "n")) {
+    return(FALSE)
+  }
+  stop("Environment variable ", name, " must be TRUE or FALSE.", call. = FALSE)
+}
+
 config <- list(
-  data_file = "data/FluSub_jp/FluSub_11to19_jp_per_20240925.csv",
-  out_dir = file.path("result", "FluSub_JP", paste0(format(Sys.Date(), "%Y%m%d"), "_UIC_MDR_primary")),
+  data_file = env_chr("FLU_SUBTYPE_DATA_FILE", "data/FluSub_jp/FluSub_11to19_jp_per_20240925.csv"),
+  out_dir = env_chr(
+    "FLU_SUBTYPE_OUT_DIR",
+    file.path("result", "FluSub_JP", paste0(format(Sys.Date(), "%Y%m%d"), "_UIC_MDR_primary"))
+  ),
   subtype_vars = c("B", "A_H1N1", "A_H3N2"),
 
   # UIC settings. Primary analysis excludes tp = 0 to avoid contemporaneous seasonal synchrony.
-  E_range = 1:20, # 埋め込み次元またはラグ数候補の範囲(過去何ステップ分の情報を状態空間再構成に使うか、または対象変数の自己履歴をどの程度含めるかに関係します)
-  tp_range = -12:-1, # 予測ラグの範囲(例えば、 tp=-3 なら「A/H1N1 の 3週前の値」が、現在または1週後の B に関係するか)
-  tau = 1, # 予測ステップ数（デフォルトは1, 1週間刻みでラグを取る）
-  alpha = 0.05, # 有意水準
-  num_surr = 2000, # サロゲートデータの数
-  season_period = 52, # 季節周期（季節周期を 52 週に設定、単位はステップ数、日本でのインフルエンザシーズンを考慮）
-  random_seed = 1234, # 乱数シード
+  E_range = env_int_vector("FLU_SUBTYPE_E_RANGE", 1:20), # 埋め込み次元またはラグ数候補の範囲
+  tp_range = env_int_vector("FLU_SUBTYPE_TP_RANGE", -12:-1), # 予測ラグの範囲
+  tau = env_int("FLU_SUBTYPE_TAU", 1), # 予測ステップ数（デフォルトは1, 1週間刻みでラグを取る）
+  alpha = env_num("FLU_SUBTYPE_ALPHA", 0.05), # 有意水準
+  num_surr = env_int("FLU_SUBTYPE_NUM_SURR", 2000), # 季節サロゲートデータの数
+  uic_internal_num_surr = env_int("FLU_SUBTYPE_UIC_INTERNAL_NUM_SURR", 1), # rUIC内部p値用。主判定には使わない
+  season_period = env_int("FLU_SUBTYPE_SEASON_PERIOD", 52), # 季節周期
+  random_seed = env_int("FLU_SUBTYPE_RANDOM_SEED", 1234), # 乱数シード
 
   # MDR S-map settings.
-  smap_tp = 1, # S-map の予測ターゲットとなる時間ステップ（1週間後の値を予測）
+  smap_tp = env_int("FLU_SUBTYPE_SMAP_TP", 1), # S-map の予測ターゲットとなる時間ステップ
   mdr_include_var = "strongest_only", # 各効果変数に対して、UICで最も強い関係を示した原因変数だけを MDR S-map に入れる設定
-  mdr_E = 3, # MDR S-map に使用する埋め込み次元：状態空間を構成する際に3次元の情報を使う
-  n_ssr = 2000, # サロゲートデータの数
-  k = NULL, # if NULL, floor(sqrt(n_ssr)) is used. 近傍点数？
-  theta_grid = c(
-    0, 1e-4, 3e-4, 1e-3, 3e-3, 1e-2, 3e-2,
-    0.1, 0.3, 0.5, 0.75, 1, 1.5, 2, 3, 4, 6, 8
-  ), # 拡散係数のグリッド値、S-mapでは、theta が大きいほど、近い状態にある点を重視する局所モデルになる
+  mdr_E = env_int("FLU_SUBTYPE_MDR_E", 3), # MDR S-map に使用する埋め込み次元
+  n_ssr = env_int("FLU_SUBTYPE_N_SSR", 2000), # random multiview embeddingの候補数
+  k = env_int_nullable("FLU_SUBTYPE_K", NULL), # if NULL, floor(sqrt(n_ssr)) is used.
+  theta_grid = env_num_vector(
+    "FLU_SUBTYPE_THETA_GRID",
+    c(0, 1e-4, 3e-4, 1e-3, 3e-3, 1e-2, 3e-2, 0.1, 0.3, 0.5, 0.75, 1, 1.5, 2, 3, 4, 6, 8)
+  ), # S-mapでは、theta が大きいほど近い状態にある点を重視する
 
   # 正則化付き MDR S-map を使うかどうか。感度分析として、TRUE のままで解析を進めることも可能
-  ridge_regularized_mdr = FALSE, # 主解析は使わない
-  lambda_grid = c(0), # 正則化の強さのグリッド値。0は正則化なし
+  ridge_regularized_mdr = env_logical("FLU_SUBTYPE_RIDGE_REGULARIZED_MDR", FALSE), # 主解析は使わない
+  lambda_grid = env_num_vector("FLU_SUBTYPE_LAMBDA_GRID", c(0)), # 正則化の強さのグリッド値。0は正則化なし
   alpha_glmnet = 0, # alpha = 0：Ridge, alpha = 1：Lasso, 0 < alpha < 1：Elastic Net
 
   # Figure export.
-  dpi = 300,
+  dpi = env_int("FLU_SUBTYPE_DPI", 300),
   fig_width = 12,
   fig_height = 8
 )
 if (is.null(config$k)) config$k <- floor(sqrt(config$n_ssr))
+if (config$num_surr < 1) stop("config$num_surr must be >= 1.", call. = FALSE)
+if (config$uic_internal_num_surr < 1) stop("config$uic_internal_num_surr must be >= 1.", call. = FALSE)
+if (config$n_ssr < 1) stop("config$n_ssr must be >= 1.", call. = FALSE)
+if (config$k < 1) stop("config$k must be >= 1.", call. = FALSE)
+if (config$alpha <= 0 || config$alpha > 1) stop("config$alpha must be in (0, 1].", call. = FALSE)
+log_msg("Input file: ", config$data_file)
+log_msg("Subtypes: ", paste(config$subtype_vars, collapse = ", "))
+log_msg(
+  "UIC settings: E = ", paste(range(config$E_range), collapse = "-"),
+  ", tp = ", paste(range(config$tp_range), collapse = " to "),
+  ", seasonal surrogates = ", config$num_surr,
+  ", rUIC internal surrogates = ", config$uic_internal_num_surr
+)
+log_msg(
+  "MDR settings: mdr_E = ", config$mdr_E,
+  ", n_ssr = ", config$n_ssr,
+  ", k = ", config$k,
+  ", theta candidates = ", length(config$theta_grid)
+)
 
 # -----------------------------
 # 2. Output paths
 # -----------------------------
+log_section("2. Output paths")
 safe_dir <- function(path) {
   dir.create(path, recursive = TRUE, showWarnings = FALSE)
   path
@@ -192,6 +484,9 @@ paths <- list(
   mdr_fig = safe_dir(file.path(config$out_dir, "figures", "mdr_smap")),
   manuscript = safe_dir(file.path(config$out_dir, "manuscript_ready"))
 )
+log_msg("Output root: ", normalizePath(paths$root, winslash = "/", mustWork = FALSE))
+log_msg("Tables: ", normalizePath(paths$tables, winslash = "/", mustWork = FALSE))
+log_msg("Figures: ", normalizePath(paths$fig, winslash = "/", mustWork = FALSE))
 
 save_csv <- function(x, path) {
   readr::write_csv(x, path, na = "")
@@ -236,12 +531,15 @@ theme_set(theme_pub())
 # -----------------------------
 # 3. Data preparation
 # -----------------------------
+log_section("3. Data preparation")
 read_prepare_flu <- function(data_file, subtype_vars) {
+  log_msg("Reading influenza subtype data: ", data_file)
   if (!file.exists(data_file)) {
     stop("Data file not found: ", data_file, call. = FALSE)
   }
 
   raw <- read.csv(data_file, check.names = FALSE)
+  log_msg("Raw data loaded: ", nrow(raw), " rows x ", ncol(raw), " columns")
 
   required <- c("year", "week", subtype_vars)
   missing <- setdiff(required, names(raw))
@@ -260,6 +558,10 @@ read_prepare_flu <- function(data_file, subtype_vars) {
 
   raw$Date <- as.Date(raw$Date)
   raw <- raw[order(raw$Date), ]
+  log_msg(
+    "Date range after ISO-week conversion: ",
+    min(raw$Date, na.rm = TRUE), " to ", max(raw$Date, na.rm = TRUE)
+  )
 
   out <- data.frame(Date = raw$Date)
 
@@ -273,8 +575,11 @@ read_prepare_flu <- function(data_file, subtype_vars) {
         call. = FALSE
       )
     }
+    if (any(x < 0)) {
+      stop("Subtype variable contains negative values: ", v, call. = FALSE)
+    }
 
-    out[[v]] <- log(x + 1)
+    out[[v]] <- log1p(x)
   }
 
   keep <- c(
@@ -283,6 +588,10 @@ read_prepare_flu <- function(data_file, subtype_vars) {
   )
 
   out <- out[, keep, drop = FALSE]
+  dropped_vars <- setdiff(subtype_vars, names(out))
+  if (length(dropped_vars) > 0) {
+    log_msg("Dropped all-zero subtype columns: ", paste(dropped_vars, collapse = ", "), level = "WARN")
+  }
 
   if (anyNA(out)) {
     stop(
@@ -301,6 +610,11 @@ df_model <- df_log %>%
 vars <- names(df_model)
 
 save_csv(df_log, file.path(paths$tables, "prepared_log1p_timeseries.csv"))
+log_msg(
+  "Prepared model data: ", nrow(df_model), " time points; variables = ",
+  paste(vars, collapse = ", ")
+)
+log_msg("Saved prepared time series: ", file.path(paths$tables, "prepared_log1p_timeseries.csv"))
 
 # -----------------------------
 # 4. Seasonal surrogate for weekly data
@@ -331,27 +645,57 @@ make_seasonal_surrogates <- function(ts, num_surr, period = 52, seed = NULL) {
 # -----------------------------
 # 5. UIC with seasonal surrogate correction
 # -----------------------------
-run_uic_pair <- function(df_model, effect_var, cause_var, config, paths) {
-  message("UIC: ", cause_var, " -> ", effect_var)
+log_section("5. UIC with seasonal surrogate correction")
 
-  obs <- rUIC::uic(
-    as.data.frame(df_model),
+run_uic_grid <- function(block, lib_var, tar_var, E, tau, tp, num_surr = 1) {
+  out <- rUIC::uic(
+    as.data.frame(block),
+    lib_var = lib_var,
+    tar_var = tar_var,
+    E = E,
+    tau = tau,
+    tp = tp,
+    num_surr = num_surr
+  ) %>%
+    as_tibble()
+
+  if (!("ete" %in% names(out))) {
+    stop("rUIC::uic() output does not include 'ete'.", call. = FALSE)
+  }
+
+  out %>%
+    dplyr::group_by(.data$tp) %>%
+    dplyr::arrange(dplyr::desc(.data$ete), .by_group = TRUE) %>%
+    dplyr::slice(1) %>%
+    dplyr::ungroup() %>%
+    dplyr::arrange(.data$tp)
+}
+
+run_uic_pair <- function(df_model, effect_var, cause_var, config, paths, pair_id = NULL, total_pairs = NULL) {
+  pair_start <- Sys.time()
+  pair_prefix <- if (!is.null(pair_id) && !is.null(total_pairs)) {
+    paste0("pair ", pair_id, "/", total_pairs, ": ")
+  } else {
+    ""
+  }
+  log_msg("UIC started: ", pair_prefix, cause_var, " -> ", effect_var)
+
+  obs <- run_uic_grid(
+    block = df_model,
     lib_var = effect_var,
     tar_var = cause_var,
     E = config$E_range,
     tau = config$tau,
     tp = config$tp_range,
-    alpha = config$alpha
-  ) %>%
-    as_tibble() %>%
-    dplyr::group_by(tp) %>%
-    dplyr::arrange(dplyr::desc(ete), .by_group = TRUE) %>%
-    dplyr::slice(1) %>%
-    dplyr::ungroup() %>%
-    dplyr::arrange(tp)
+    num_surr = config$uic_internal_num_surr
+  )
+  log_msg(
+    "Observed UIC completed for ", cause_var, " -> ", effect_var,
+    ": ", nrow(obs), " tp rows retained"
+  )
 
   if (!("ete" %in% names(obs))) {
-    stop("rUIC::uic.optimal() output does not include 'ete'.", call. = FALSE)
+    stop("rUIC::uic() output does not include 'ete'.", call. = FALSE)
   }
   if (!("te" %in% names(obs))) {
     obs <- obs %>% mutate(te = .data$ete)
@@ -359,38 +703,57 @@ run_uic_pair <- function(df_model, effect_var, cause_var, config, paths) {
   if (!("pval" %in% names(obs))) {
     obs <- obs %>% mutate(pval = NA_real_)
   }
+  obs_best <- obs %>%
+    arrange(desc(.data$ete)) %>%
+    slice(1)
+  log_msg(
+    "Observed best lag: tp = ", obs_best$tp[[1]],
+    ", E = ", obs_best$E[[1]],
+    ", ete = ", signif(obs_best$ete[[1]], 4)
+  )
 
+  log_msg(
+    "Creating ", config$num_surr, " seasonal surrogates for effect variable ",
+    effect_var, " (period = ", config$season_period, ")"
+  )
   effect_surr <- make_seasonal_surrogates(
     df_model[[effect_var]],
     num_surr = config$num_surr,
     period = config$season_period,
     seed = config$random_seed
   )
+  log_msg("Seasonal surrogate matrix created: ", nrow(effect_surr), " x ", ncol(effect_surr))
 
   surr_ete <- matrix(NA_real_, nrow = nrow(obs), ncol = config$num_surr)
   rownames(surr_ete) <- paste0("tp_", obs$tp)
   colnames(surr_ete) <- paste0("surr_", seq_len(config$num_surr))
 
+  log_msg("Running surrogate UIC loop for ", cause_var, " -> ", effect_var)
+  surr_progress <- progress_points(config$num_surr, n = 10)
   for (i in seq_len(config$num_surr)) {
     tmp <- data.frame(effect = effect_surr[, i], cause = df_model[[cause_var]])
-    sres <- rUIC::uic(
-      as.data.frame(tmp),
+    sres <- run_uic_grid(
+      block = tmp,
       lib_var = "effect",
       tar_var = "cause",
       E = config$E_range,
       tau = config$tau,
       tp = config$tp_range,
-      alpha = config$alpha
+      num_surr = config$uic_internal_num_surr
     ) %>%
-      as_tibble() %>%
-      dplyr::group_by(tp) %>%
-      dplyr::arrange(dplyr::desc(ete), .by_group = TRUE) %>%
-      dplyr::slice(1) %>%
-      dplyr::ungroup() %>%
       dplyr::select(tp, ete)
     surr_ete[, i] <- sres$ete[match(obs$tp, sres$tp)]
+    if (i %in% surr_progress) {
+      log_msg(
+        "Surrogate UIC progress for ", cause_var, " -> ", effect_var,
+        ": ", i, "/", config$num_surr,
+        " (", round(100 * i / config$num_surr), "%; elapsed ",
+        format_elapsed(pair_start), ")"
+      )
+    }
   }
 
+  log_msg("Calculating surrogate quantiles and empirical p-values for ", cause_var, " -> ", effect_var)
   qfun <- function(x, p) as.numeric(quantile(x, probs = p, na.rm = TRUE, names = FALSE))
   q90 <- apply(surr_ete, 1, qfun, p = 0.90)
   q95 <- apply(surr_ete, 1, qfun, p = 0.95)
@@ -421,10 +784,16 @@ run_uic_pair <- function(df_model, effect_var, cause_var, config, paths) {
       sig_pointwise = .data$p_emp < config$alpha & .data$ete > .data$q95,
       sig_global = .data$p_global < config$alpha & .data$ete > .data$q95_global
     )
+  log_msg(
+    "UIC significance summary for ", cause_var, " -> ", effect_var,
+    ": pointwise significant tp = ", sum(res$sig_pointwise, na.rm = TRUE),
+    ", global significant tp = ", sum(res$sig_global, na.rm = TRUE)
+  )
 
   tag <- paste0(cause_var, "_to_", effect_var)
   save_csv(res, file.path(paths$uic_tables, paste0(tag, "_uic_surrogate_corrected.csv")))
   save_csv(as.data.frame(surr_ete), file.path(paths$uic_tables, paste0(tag, "_surrogate_ete_matrix.csv")))
+  log_msg("Saved UIC tables for ", tag)
 
   p <- ggplot(res, aes(x = .data$tp)) +
     geom_line(aes(y = .data$ete), linewidth = 0.6) +
@@ -445,16 +814,31 @@ run_uic_pair <- function(df_model, effect_var, cause_var, config, paths) {
   ggsave(file.path(paths$uic_fig, paste0(tag, "_Figure3_component_UIC.tiff")), p,
     width = 8, height = 6, dpi = config$dpi, compression = "lzw"
   )
+  log_msg(
+    "UIC completed: ", cause_var, " -> ", effect_var,
+    " (elapsed ", format_elapsed(pair_start), ")"
+  )
 
   res
 }
 
-uic_all <- purrr::map_dfr(vars, function(effect_var) {
-  purrr::map_dfr(setdiff(vars, effect_var), function(cause_var) {
-    run_uic_pair(df_model, effect_var, cause_var, config, paths)
-  })
+uic_pair_grid <- tidyr::crossing(effect_var = vars, cause_var = vars) %>%
+  filter(.data$effect_var != .data$cause_var)
+log_msg("UIC pair plan: ", nrow(uic_pair_grid), " directed subtype pairs")
+
+uic_all <- purrr::map_dfr(seq_len(nrow(uic_pair_grid)), function(i) {
+  run_uic_pair(
+    df_model = df_model,
+    effect_var = uic_pair_grid$effect_var[[i]],
+    cause_var = uic_pair_grid$cause_var[[i]],
+    config = config,
+    paths = paths,
+    pair_id = i,
+    total_pairs = nrow(uic_pair_grid)
+  )
 })
 
+log_msg("Applying FDR correction across all UIC lag results")
 uic_all <- uic_all %>%
   mutate(
     p_global_fdr = p.adjust(.data$p_global, method = "BH"),
@@ -463,6 +847,7 @@ uic_all <- uic_all %>%
   )
 
 save_csv(uic_all, file.path(paths$tables, "uic_all_pairs_surrogate_corrected.csv"))
+log_msg("Saved all-pair UIC table: ", file.path(paths$tables, "uic_all_pairs_surrogate_corrected.csv"))
 
 selected_links <- uic_all %>%
   filter(.data$sig_primary, .data$tp < 0) %>%
@@ -479,12 +864,17 @@ selected_links <- uic_all %>%
   )
 
 save_csv(selected_links, file.path(paths$tables, "uic_selected_links_for_MDR.csv"))
+log_msg("Selected UIC links entering MDR: ", nrow(selected_links))
+if (nrow(selected_links) > 0) {
+  print(selected_links %>% select(effect_var, cause_var, tp, lag_weeks, ete, p_global_fdr))
+}
 
 if (nrow(selected_links) == 0) {
   stop("No UIC links passed the surrogate/FDR primary criterion. Inspect uic_all_pairs_surrogate_corrected.csv.", call. = FALSE)
 }
 
 # Combined UIC figure for manuscript Figure 3.
+log_msg("Building combined UIC Figure 3 from selected links")
 uic_plot_data <- uic_all %>%
   semi_join(selected_links %>% select(effect_var, cause_var), by = c("effect_var", "cause_var")) %>%
   mutate(edge = edge_label(.data$cause_var, .data$effect_var))
@@ -509,10 +899,13 @@ fig3 <- ggplot(uic_plot_data, aes(x = .data$tp)) +
 ggsave(file.path(paths$fig, "Figure3_UIC_seasonal_surrogate_selected_links.tiff"), fig3,
   width = 13, height = 7, dpi = config$dpi, compression = "lzw"
 )
+log_msg("Saved Figure 3: ", file.path(paths$fig, "Figure3_UIC_seasonal_surrogate_selected_links.tiff"))
 
 # -----------------------------
 # 6. MDR S-map per effect variable
 # -----------------------------
+log_section("6. MDR S-map per effect variable")
+
 coef_name_map <- function(block_mvd, coef_df) {
   # In macam/macamts extended_lnlp, c_1 corresponds to the first block column,
   # c_2 to the second block column, etc. c_0, if present, is the intercept.
@@ -543,20 +936,37 @@ pred_dates <- function(pred_df, df_log) {
   df_log$Date[idx]
 }
 
-run_mdr_for_effect <- function(effect_var, selected_links, df_model, df_log, config, paths) {
-  message("MDR S-map for effect: ", effect_var)
+run_mdr_for_effect <- function(effect_var, selected_links, df_model, df_log, config, paths, effect_id = NULL, total_effects = NULL) {
+  effect_start <- Sys.time()
+  effect_prefix <- if (!is.null(effect_id) && !is.null(total_effects)) {
+    paste0("effect ", effect_id, "/", total_effects, ": ")
+  } else {
+    ""
+  }
+  log_msg("MDR S-map started: ", effect_prefix, "effect = ", effect_var)
 
   links_eff <- selected_links %>% filter(.data$effect_var == effect_var)
   if (nrow(links_eff) == 0) {
+    log_msg("No selected UIC links for effect = ", effect_var, "; skipping MDR", level = "WARN")
     return(NULL)
   }
+  log_msg("MDR links for ", effect_var, ": ", nrow(links_eff))
+  print(links_eff %>% select(effect_var, cause_var, tp, lag_weeks, ete, p_global_fdr))
 
   # Estimate effect-variable embedding dimension for the effect-history part of block_mvd.
-  simp_x <- rUIC::simplex(df_model, lib_var = effect_var, E = config$E_range, tp = config$smap_tp)
+  log_msg("Running simplex to choose effect-history embedding for ", effect_var)
+  simp_x <- rUIC::simplex(
+    df_model,
+    lib_var = effect_var,
+    E = config$E_range,
+    tp = config$smap_tp,
+    num_surr = config$uic_internal_num_surr
+  )
   simp_x <- as_tibble(simp_x)
   Ex <- simp_x[which.min(simp_x$rmse), "E", drop = TRUE]
   Ex <- max(1, as.integer(Ex))
   save_csv(simp_x, file.path(paths$mdr_tables, paste0(effect_var, "_simplex_for_effect_embedding.csv")))
+  log_msg("Simplex completed for ", effect_var, ": selected Ex = ", Ex)
 
   # Critical: make_block_mvd() internally filters on the column named 'pval'.
   # Therefore pval is replaced by the surrogate/FDR p-value for MDR block construction.
@@ -578,10 +988,12 @@ run_mdr_for_effect <- function(effect_var, selected_links, df_model, df_log, con
     )
 
   save_csv(uic_for_block, file.path(paths$mdr_tables, paste0(effect_var, "_uic_links_entering_MDR.csv")))
+  log_msg("Saved MDR input UIC links for ", effect_var)
 
   # tp_adjust keeps the UIC lag interpretation consistent with the one-step S-map.
   # Example: UIC tp = -9 and S-map tp = 1 -> use cause_tp-8, so the target effect(t+1)
   # is paired with cause(t-8), preserving a 9-week cause-to-effect lag.
+  log_msg("Building MDR block_mvd for ", effect_var, " using make_block_mvd()")
   block_mvd <- make_block_mvd_compat(
     block = df_model,
     uic_res = as.data.frame(uic_for_block),
@@ -596,9 +1008,17 @@ run_mdr_for_effect <- function(effect_var, selected_links, df_model, df_log, con
   )
 
   save_csv(as_tibble(block_mvd), file.path(paths$mdr_tables, paste0(effect_var, "_block_mvd.csv")))
+  log_msg(
+    "MDR block_mvd created for ", effect_var,
+    ": ", nrow(block_mvd), " rows x ", ncol(block_mvd), " columns"
+  )
 
   mvd_E <- min(config$mdr_E, ncol(block_mvd))
   if (mvd_E < 1) stop("mvd_E became < 1; inspect block_mvd.", call. = FALSE)
+  log_msg(
+    "Computing multiview distance for ", effect_var,
+    " (E = ", mvd_E, ", n_ssr = ", config$n_ssr, ", k = ", config$k, ")"
+  )
 
   dist_info <- compute_mvd_compat(
     block_mvd = block_mvd,
@@ -613,6 +1033,10 @@ run_mdr_for_effect <- function(effect_var, selected_links, df_model, df_log, con
   )
   multiview_dist <- dist_info$multiview_dist
   save_rds(dist_info, file.path(paths$mdr_tables, paste0(effect_var, "_multiview_distance_and_embeddings.rds")))
+  log_msg(
+    "Multiview distance completed for ", effect_var,
+    ": matrix ", nrow(multiview_dist), " x ", ncol(multiview_dist)
+  )
 
   param_grid <- expand.grid(
     theta = config$theta_grid,
@@ -620,8 +1044,19 @@ run_mdr_for_effect <- function(effect_var, selected_links, df_model, df_log, con
     KEEP.OUT.ATTRS = FALSE,
     stringsAsFactors = FALSE
   )
+  log_msg(
+    "Starting MDR theta/lambda search for ", effect_var,
+    ": ", nrow(param_grid), " parameter combinations"
+  )
 
-  param_res <- purrr::pmap_dfr(param_grid, function(theta, lambda) {
+  param_res <- purrr::map_dfr(seq_len(nrow(param_grid)), function(param_id) {
+    theta <- param_grid$theta[[param_id]]
+    lambda <- param_grid$lambda[[param_id]]
+    log_msg(
+      "MDR parameter search ", effect_var,
+      ": ", param_id, "/", nrow(param_grid),
+      " theta = ", theta, ", lambda = ", lambda
+    )
     fit <- s_map_mdr_compat(
       block_mvd = block_mvd,
       dist_w = multiview_dist,
@@ -633,18 +1068,34 @@ run_mdr_for_effect <- function(effect_var, selected_links, df_model, df_log, con
       save_smap_coefficients = FALSE,
       random_seed = config$random_seed
     )
-    as_tibble(fit$stats) %>% mutate(theta = theta, lambda = lambda)
+    fit_stats <- as_tibble(fit$stats) %>% mutate(theta = theta, lambda = lambda)
+    log_msg(
+      "MDR parameter result ", effect_var,
+      ": theta = ", theta,
+      ", rho = ", signif(fit_stats$rho[[1]], 4),
+      ", rmse = ", signif(fit_stats$rmse[[1]], 4)
+    )
+    fit_stats
   }) %>%
     select(any_of(c("N", "theta", "lambda", "rho", "mae", "rmse")), everything())
 
   save_csv(param_res, file.path(paths$mdr_tables, paste0(effect_var, "_MDR_parameter_search.csv")))
+  log_msg("Saved MDR parameter search table for ", effect_var)
 
   best <- param_res %>%
     filter(is.finite(.data$rmse)) %>%
     arrange(.data$rmse, desc(.data$rho)) %>%
     slice(1)
   if (nrow(best) == 0) stop("No valid MDR parameter result for ", effect_var, call. = FALSE)
+  log_msg(
+    "Best MDR parameters for ", effect_var,
+    ": theta = ", best$theta[[1]],
+    ", lambda = ", best$lambda[[1]],
+    ", rho = ", signif(best$rho[[1]], 4),
+    ", rmse = ", signif(best$rmse[[1]], 4)
+  )
 
+  log_msg("Running final MDR S-map with coefficient export for ", effect_var)
   final_fit <- s_map_mdr_compat(
     block_mvd = block_mvd,
     dist_w = multiview_dist,
@@ -658,6 +1109,7 @@ run_mdr_for_effect <- function(effect_var, selected_links, df_model, df_log, con
   )
 
   save_rds(final_fit, file.path(paths$mdr_tables, paste0(effect_var, "_MDR_final_fit.rds")))
+  log_msg("Saved final MDR fit RDS for ", effect_var)
 
   pred <- as_tibble(final_fit$model_output) %>%
     mutate(Date = pred_dates(., df_log), effect_var = effect_var) %>%
@@ -668,6 +1120,10 @@ run_mdr_for_effect <- function(effect_var, selected_links, df_model, df_log, con
 
   save_csv(pred, file.path(paths$mdr_tables, paste0(effect_var, "_MDR_prediction.csv")))
   save_csv(coefs, file.path(paths$mdr_tables, paste0(effect_var, "_MDR_coefficients_raw.csv")))
+  log_msg(
+    "Saved MDR predictions and raw coefficients for ", effect_var,
+    ": predictions = ", nrow(pred), " rows; coefficients = ", nrow(coefs), " rows"
+  )
 
   cmap <- coef_name_map(block_mvd, coefs)
   save_csv(cmap, file.path(paths$mdr_tables, paste0(effect_var, "_MDR_coefficient_column_map.csv")))
@@ -677,7 +1133,9 @@ run_mdr_for_effect <- function(effect_var, selected_links, df_model, df_log, con
       paste(cmap$coef_col[!cmap$exists], collapse = ", ")
     )
   }
+  log_msg("Mapped MDR coefficient columns for ", effect_var)
 
+  log_msg("Extracting edge-specific MDR coefficients for ", effect_var)
   edge_coef <- purrr::map_dfr(seq_len(nrow(uic_for_block)), function(i) {
     link <- uic_for_block[i, ]
     adjusted_tp <- link$tp + config$smap_tp
@@ -689,6 +1147,7 @@ run_mdr_for_effect <- function(effect_var, selected_links, df_model, df_log, con
       return(tibble())
     }
 
+    coef_values <- coefs[[coef_col]]
     tibble(
       Date = coefs$Date,
       effect_var = link$effect_var,
@@ -698,11 +1157,19 @@ run_mdr_for_effect <- function(effect_var, selected_links, df_model, df_log, con
       uic_tp = link$tp,
       mdr_block_col = block_col,
       coef_col = coef_col,
-      coef_value = coefs[[coef_col]]
+      coef_value = coef_values
     )
   })
 
   save_csv(edge_coef, file.path(paths$mdr_tables, paste0(effect_var, "_MDR_edge_coefficients_long.csv")))
+  log_msg("Saved edge coefficient long table for ", effect_var, ": ", nrow(edge_coef), " rows")
+  if (nrow(edge_coef) == 0) {
+    stop(
+      "No MDR edge coefficients were extracted for ", effect_var,
+      ". Check the block_mvd column names and coefficient map table.",
+      call. = FALSE
+    )
+  }
 
   edge_summary <- edge_coef %>%
     group_by(.data$effect_var, .data$cause_var, .data$edge, .data$lag_weeks, .data$uic_tp, .data$mdr_block_col, .data$coef_col) %>%
@@ -728,17 +1195,20 @@ run_mdr_for_effect <- function(effect_var, selected_links, df_model, df_log, con
       theta = best$theta[[1]],
       lambda = best$lambda[[1]],
       rho = best$rho[[1]],
-      mae = best$mae[[1]],
+      mae = if ("mae" %in% names(best)) best$mae[[1]] else NA_real_,
       rmse = best$rmse[[1]],
       regularized = config$ridge_regularized_mdr
     )
 
   save_csv(edge_summary, file.path(paths$mdr_tables, paste0(effect_var, "_MDR_edge_summary.csv")))
+  log_msg("Saved edge summary for ", effect_var, ": ", nrow(edge_summary), " rows")
+  print(edge_summary %>% select(effect_var, cause_var, lag_weeks, coef_median, prop_positive, polarity, theta, rho, rmse))
 
   # Per-effect diagnostic plot: observed vs predicted.
+  log_msg("Saving MDR observed-vs-predicted plot for ", effect_var)
   p_obs_pred <- ggplot(pred, aes(x = .data$obs, y = .data$pred)) +
     geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
-    geom_point(alpha = 0.65, size = 1.7) +
+    geom_point(alpha = 0.65, size = 1.7, na.rm = TRUE) +
     coord_equal() +
     labs(
       title = paste0("MDR S-map prediction: ", subtype_label(effect_var)),
@@ -757,6 +1227,7 @@ run_mdr_for_effect <- function(effect_var, selected_links, df_model, df_log, con
 
   # Per-effect coefficient time series.
   if (nrow(edge_coef) > 0) {
+    log_msg("Saving MDR coefficient time-series plot for ", effect_var)
     p_coef_ts <- ggplot(edge_coef, aes(x = .data$Date, y = .data$coef_value)) +
       geom_hline(yintercept = 0, linetype = "dashed") +
       geom_line(linewidth = 0.5, na.rm = TRUE) +
@@ -771,6 +1242,7 @@ run_mdr_for_effect <- function(effect_var, selected_links, df_model, df_log, con
       width = 11, height = 4 + 2.5 * length(unique(edge_coef$edge)), dpi = config$dpi, compression = "lzw"
     )
   }
+  log_msg("MDR S-map completed for ", effect_var, " (elapsed ", format_elapsed(effect_start), ")")
 
   list(
     effect_var = effect_var,
@@ -787,16 +1259,38 @@ run_mdr_for_effect <- function(effect_var, selected_links, df_model, df_log, con
   )
 }
 
-mdr_results <- purrr::map(setNames(unique(selected_links$effect_var), unique(selected_links$effect_var)), function(effect_var) {
-  run_mdr_for_effect(effect_var, selected_links, df_model, df_log, config, paths)
+mdr_effect_vars <- unique(selected_links$effect_var)
+log_msg("MDR effect plan: ", length(mdr_effect_vars), " effect variable(s): ", paste(mdr_effect_vars, collapse = ", "))
+mdr_results <- purrr::map(seq_along(mdr_effect_vars), function(i) {
+  effect_var <- mdr_effect_vars[[i]]
+  run_mdr_for_effect(
+    effect_var = effect_var,
+    selected_links = selected_links,
+    df_model = df_model,
+    df_log = df_log,
+    config = config,
+    paths = paths,
+    effect_id = i,
+    total_effects = length(mdr_effect_vars)
+  )
 })
+names(mdr_results) <- mdr_effect_vars
 mdr_results <- purrr::compact(mdr_results)
+if (length(mdr_results) == 0) {
+  stop("No MDR S-map results were generated. Inspect selected UIC links and MDR logs.", call. = FALSE)
+}
 save_rds(mdr_results, file.path(paths$mdr_tables, "MDR_results_all_effects.rds"))
+log_msg("Saved all MDR results RDS: ", file.path(paths$mdr_tables, "MDR_results_all_effects.rds"))
 
 edge_coef_all <- purrr::map_dfr(mdr_results, "edge_coef")
 edge_summary_all <- purrr::map_dfr(mdr_results, "edge_summary")
+log_msg(
+  "Combined MDR outputs: edge coefficients = ", nrow(edge_coef_all),
+  " rows; edge summaries = ", nrow(edge_summary_all), " rows"
+)
 
 # Join UIC information onto MDR summary.
+log_msg("Joining UIC information onto MDR summary")
 edge_summary_all <- edge_summary_all %>%
   left_join(
     selected_links %>%
@@ -818,8 +1312,10 @@ edge_summary_all <- edge_summary_all %>%
 
 save_csv(edge_coef_all, file.path(paths$tables, "Figure5_MDR_coefficients_long.csv"))
 save_csv(edge_summary_all, file.path(paths$tables, "Table_MDR_edge_summary.csv"))
+log_msg("Saved combined MDR coefficient and summary tables")
 
 # Compatibility export for downstream figure scripts. This does not overwrite old result folders.
+log_msg("Creating wide MDR coefficient export for downstream Figure 5 scripts")
 coef_wide <- edge_coef_all %>%
   mutate(edge_col = paste0(.data$cause_var, "_cause_", .data$effect_var)) %>%
   group_by(.data$edge_col) %>%
@@ -829,17 +1325,21 @@ coef_wide <- edge_coef_all %>%
   pivot_wider(names_from = edge_col, values_from = coef_value) %>%
   select(-row_id)
 save_csv(coef_wide, file.path(paths$tables, "MDR_coefficients_all_wide_for_Figure5.csv"))
+log_msg("Saved wide MDR coefficient table: ", file.path(paths$tables, "MDR_coefficients_all_wide_for_Figure5.csv"))
 
 # -----------------------------
 # 7. Manuscript-ready figures
 # -----------------------------
+log_section("7. Manuscript-ready figures")
+
+log_msg("Building Figure 5 coefficient distribution plot")
 fig5 <- edge_coef_all %>%
-  mutate(edge = forcats::fct_reorder(.data$edge, .data$coef_value, .fun = median, na.rm = TRUE)) %>%
+  mutate(edge = forcats::fct_reorder(.data$edge, .data$coef_value, .fun = median, na.rm = TRUE, .na_rm = TRUE)) %>%
   ggplot(aes(x = .data$edge, y = .data$coef_value)) +
   geom_hline(yintercept = 0, linetype = "dashed") +
   geom_violin(alpha = 0.45, trim = FALSE, na.rm = TRUE) +
   geom_boxplot(width = 0.18, outlier.shape = NA, alpha = 0.75, na.rm = TRUE) +
-  sinaplot::geom_sina(alpha = 0.35, size = 0.8, na.rm = TRUE) +
+  ggforce::geom_sina(alpha = 0.35, size = 0.8, na.rm = TRUE) +
   coord_flip() +
   labs(
     title = "Figure 5. MDR S-map coefficients for UIC-selected subtype interactions",
@@ -852,8 +1352,10 @@ ggsave(file.path(paths$fig, "Figure5_MDR_Smap_coefficients.tiff"), fig5,
   width = 10, height = max(5, 1.5 + length(unique(edge_coef_all$edge)) * 1.0),
   dpi = config$dpi, compression = "lzw"
 )
+log_msg("Saved Figure 5: ", file.path(paths$fig, "Figure5_MDR_Smap_coefficients.tiff"))
 
 # Figure 4 network summary.
+log_msg("Building Figure 4 network summary")
 coords <- tibble(
   node = c("B", "A_H1N1", "A_H3N2"),
   x = c(0, -1, 1),
@@ -877,6 +1379,7 @@ if (!all(is.finite(abs_rng)) || abs_rng[1] == abs_rng[2]) {
 }
 
 save_csv(edges_net, file.path(paths$tables, "Figure4_network_edges_MDR.csv"))
+log_msg("Saved Figure 4 edge data: ", file.path(paths$tables, "Figure4_network_edges_MDR.csv"))
 
 fig4 <- ggplot() +
   geom_segment(
@@ -903,10 +1406,14 @@ fig4 <- ggplot() +
 ggsave(file.path(paths$fig, "Figure4_UIC_MDR_network.tiff"), fig4,
   width = 8, height = 6, dpi = config$dpi, compression = "lzw"
 )
+log_msg("Saved Figure 4: ", file.path(paths$fig, "Figure4_UIC_MDR_network.tiff"))
 
 # -----------------------------
 # 8. Manuscript-ready tables and text snippets
 # -----------------------------
+log_section("8. Manuscript-ready tables and text snippets")
+
+log_msg("Building manuscript-ready main results table")
 table_main <- edge_summary_all %>%
   transmute(
     Cause = subtype_label(.data$cause_var),
@@ -926,6 +1433,8 @@ table_main <- edge_summary_all %>%
   )
 
 save_csv(table_main, file.path(paths$tables, "Table1_UIC_MDR_main_results.csv"))
+log_msg("Saved Table 1 main results: ", file.path(paths$tables, "Table1_UIC_MDR_main_results.csv"))
+print(table_main)
 
 methods_text <- c(
   "Suggested Methods replacement for the S-map paragraph:",
@@ -952,10 +1461,14 @@ methods_text <- c(
   "Suggested Results table is exported as tables/Table1_UIC_MDR_main_results.csv. Replace numerical values in the manuscript after running the script on the final dataset."
 )
 writeLines(methods_text, file.path(paths$manuscript, "MDR_methods_results_figure_legend_text.txt"))
+log_msg("Saved manuscript text snippets: ", file.path(paths$manuscript, "MDR_methods_results_figure_legend_text.txt"))
 
 # -----------------------------
 # 9. Session information
 # -----------------------------
+log_section("9. Session information")
+
+log_msg("Writing sessionInfo.txt")
 sink(file.path(paths$root, "sessionInfo.txt"))
 cat("MDR package used: ", mdr_pkg, "\n")
 cat("MDR package version: ", as.character(utils::packageVersion(mdr_pkg)), "\n")
@@ -966,5 +1479,10 @@ print(config)
 cat("\nSession info:\n")
 print(sessionInfo())
 sink()
+log_msg("Saved session info: ", file.path(paths$root, "sessionInfo.txt"))
 
-message("Done. Results written to: ", normalizePath(paths$root, winslash = "/", mustWork = FALSE))
+log_msg(
+  "Done. Results written to: ",
+  normalizePath(paths$root, winslash = "/", mustWork = FALSE),
+  " (total elapsed ", format_elapsed(analysis_start_time), ")"
+)
