@@ -21,7 +21,8 @@ rm(list = ls())
 # -----------------------------
 # 0. Bootstrap and packages
 # -----------------------------
-setwd("~/Desktop/_GSAIS_/mzmtlab/microbiome dynamics/edm_code/projects/jp_flu_subtypes/scripts")
+# Run this script from anywhere inside the edm_code project.
+# The bootstrap search below climbs parent directories until it finds R/bootstrap.R.
 # ---- edm_code bootstrap ----
 source_edm_bootstrap <- function() {
   current <- normalizePath(getwd(), winslash = "/", mustWork = TRUE)
@@ -61,26 +62,39 @@ pacman::p_load(
   rEDM, # Empirical Dynamic Modeling
   grid # 図の細かい制御
 )
-# Load library
-packageVersion("rEDM") # v 0.7.5
-packageVersion("macamts") # v 0.1.4
-packageVersion("rUIC") # v 0.9.12
+# Record package versions without assuming that both MDR packages are installed.
+message("rEDM version: ", as.character(utils::packageVersion("rEDM")))
+message("rUIC version: ", as.character(utils::packageVersion("rUIC")))
 
 resolve_mdr_pkg <- function() {
-  candidates <- c("macamts", "macam")
-  for (pkg in candidates) {
-    if (requireNamespace(pkg, quietly = TRUE)) {
+  # Prefer a package version that supports tp_adjust in make_block_mvd();
+  # this is required to keep UIC lags aligned with the one-step MDR S-map target.
+  candidates <- c("macam", "macamts")
+  installed <- candidates[vapply(candidates, requireNamespace, quietly = TRUE, FUN.VALUE = logical(1))]
+
+  if (length(installed) == 0) {
+    stop(
+      "Neither 'macam' nor 'macamts' is installed. Install the current package, e.g. remotes::install_github('ong8181/macam').",
+      call. = FALSE
+    )
+  }
+
+  for (pkg in installed) {
+    f <- tryCatch(getExportedValue(pkg, "make_block_mvd"), error = function(e) NULL)
+    if (!is.null(f) && "tp_adjust" %in% names(formals(f))) {
       return(pkg)
     }
   }
+
   stop(
-    "Neither 'macamts' nor 'macam' is installed. Install one of them, e.g. remotes::install_github('ong8181/macam').",
+    "Installed MDR package(s) do not support make_block_mvd(..., tp_adjust=). ",
+    "Update with remotes::install_github('ong8181/macam') before running the primary analysis.",
     call. = FALSE
   )
 }
 
 mdr_pkg <- resolve_mdr_pkg()
-message("Using MDR package: ", mdr_pkg)
+message("Using MDR package: ", mdr_pkg, " ", as.character(utils::packageVersion(mdr_pkg)))
 
 mdr_fun <- function(fun) {
   getExportedValue(mdr_pkg, fun)
@@ -95,7 +109,12 @@ make_block_mvd_compat <- function(block, uic_res, effect_var, max_lag, ...) {
 
   args <- c(list(block = block, uic_res = uic_res, effect_var = effect_var), dots)
   if (!is.null(dots$tp_adjust) && !("tp_adjust" %in% formal_names)) {
-    warning("Installed make_block_mvd() has no tp_adjust argument. UIC lag and one-step MDR target may be offset by one week. Update macam/macamts if possible.")
+    stop(
+      "Installed make_block_mvd() has no tp_adjust argument. ",
+      "The MDR block would not preserve UIC lag interpretation. ",
+      "Update the MDR package with remotes::install_github('ong8181/macam').",
+      call. = FALSE
+    )
   }
   if ("max_lag" %in% formal_names) {
     args$max_lag <- max_lag
@@ -143,7 +162,7 @@ config <- list(
   subtype_vars = c("B", "A_H1N1", "A_H3N2"),
 
   # UIC settings. Primary analysis excludes tp = 0 to avoid contemporaneous seasonal synchrony.
-  E_range = 1:20, # 埋め込み次元またはラグ数候補の範囲(過去何ステップ分の情報を状態空間再構成に使うか、または対象変数の自己履歴をどの程度含めるかに関係します)
+  E_range = 0:20, # 埋め込み次元またはラグ数候補の範囲(過去何ステップ分の情報を状態空間再構成に使うか、または対象変数の自己履歴をどの程度含めるかに関係します)
   tp_range = -12:-1, # 予測ラグの範囲(例えば、 tp=-3 なら「A/H1N1 の 3週前の値」が、現在または1週後の B に関係するか)
   tau = 1, # 予測ステップ数（デフォルトは1, 1週間刻みでラグを取る）
   alpha = 0.05, # 有意水準
@@ -153,9 +172,9 @@ config <- list(
 
   # MDR S-map settings.
   smap_tp = 1, # S-map の予測ターゲットとなる時間ステップ（1週間後の値を予測）
-  mdr_include_var = "strongest_only", # 各効果変数に対して、UICで最も強い関係を示した原因変数だけを MDR S-map に入れる設定
-  mdr_E = 3, # MDR S-map に使用する埋め込み次元：状態空間を構成する際に3次元の情報を使う
-  n_ssr = 2000, # サロゲートデータの数
+  mdr_include_var = "strongest_only", # 各原因変数について、UICで最も強いtpを1つ選んでMDR blockに入れる設定
+  mdr_E = 3, # multiview distanceを計算する際の埋め込み次元
+  n_ssr = 2000, # random multiview embeddingsの候補数。seasonal surrogate数ではない
   k = NULL, # if NULL, floor(sqrt(n_ssr)) is used. 近傍点数？
   theta_grid = c(
     0, 1e-4, 3e-4, 1e-3, 3e-3, 1e-2, 3e-2,
@@ -222,7 +241,7 @@ edge_label <- function(cause, effect, lag_weeks = NULL) {
 }
 
 theme_pub <- function(base_size = 14) {
-  cowplot::theme_cowplot(font_size = base_size) +
+  cowplot::theme_cowplot(base_size = base_size) +
     theme(
       plot.title = element_text(face = "bold"),
       axis.title = element_text(face = "bold"),
@@ -295,9 +314,7 @@ read_prepare_flu <- function(data_file, subtype_vars) {
 }
 
 df_log <- read_prepare_flu(config$data_file, config$subtype_vars)
-df_model <- df_log %>%
-  dplyr::select(-Date) %>%
-  as.data.frame()
+df_model <- df_log %>% select(-Date)
 vars <- names(df_model)
 
 save_csv(df_log, file.path(paths$tables, "prepared_log1p_timeseries.csv"))
@@ -334,8 +351,8 @@ make_seasonal_surrogates <- function(ts, num_surr, period = 52, seed = NULL) {
 run_uic_pair <- function(df_model, effect_var, cause_var, config, paths) {
   message("UIC: ", cause_var, " -> ", effect_var)
 
-  obs <- rUIC::uic(
-    as.data.frame(df_model),
+  obs <- rUIC::uic.optimal(
+    df_model,
     lib_var = effect_var,
     tar_var = cause_var,
     E = config$E_range,
@@ -344,11 +361,8 @@ run_uic_pair <- function(df_model, effect_var, cause_var, config, paths) {
     alpha = config$alpha
   ) %>%
     as_tibble() %>%
-    dplyr::group_by(tp) %>%
-    dplyr::arrange(dplyr::desc(ete), .by_group = TRUE) %>%
-    dplyr::slice(1) %>%
-    dplyr::ungroup() %>%
-    dplyr::arrange(tp)
+    filter(.data$tp %in% config$tp_range) %>%
+    arrange(.data$tp)
 
   if (!("ete" %in% names(obs))) {
     stop("rUIC::uic.optimal() output does not include 'ete'.", call. = FALSE)
@@ -373,8 +387,8 @@ run_uic_pair <- function(df_model, effect_var, cause_var, config, paths) {
 
   for (i in seq_len(config$num_surr)) {
     tmp <- data.frame(effect = effect_surr[, i], cause = df_model[[cause_var]])
-    sres <- rUIC::uic(
-      as.data.frame(tmp),
+    sres <- rUIC::uic.optimal(
+      tmp,
       lib_var = "effect",
       tar_var = "cause",
       E = config$E_range,
@@ -383,11 +397,7 @@ run_uic_pair <- function(df_model, effect_var, cause_var, config, paths) {
       alpha = config$alpha
     ) %>%
       as_tibble() %>%
-      dplyr::group_by(tp) %>%
-      dplyr::arrange(dplyr::desc(ete), .by_group = TRUE) %>%
-      dplyr::slice(1) %>%
-      dplyr::ungroup() %>%
-      dplyr::select(tp, ete)
+      select(tp, ete)
     surr_ete[, i] <- sres$ete[match(obs$tp, sres$tp)]
   }
 
@@ -597,6 +607,22 @@ run_mdr_for_effect <- function(effect_var, selected_links, df_model, df_log, con
 
   save_csv(as_tibble(block_mvd), file.path(paths$mdr_tables, paste0(effect_var, "_block_mvd.csv")))
 
+  expected_block_cols <- uic_for_block %>%
+    mutate(
+      adjusted_tp = .data$tp + config$smap_tp,
+      expected_block_col = paste0(.data$cause_var, "_tp", .data$adjusted_tp)
+    )
+  missing_block_cols <- setdiff(expected_block_cols$expected_block_col, names(block_mvd))
+  if (length(missing_block_cols) > 0) {
+    stop(
+      "MDR block is missing expected UIC-selected cause-lag column(s): ",
+      paste(missing_block_cols, collapse = ", "),
+      ". Inspect ", file.path(paths$mdr_tables, paste0(effect_var, "_block_mvd.csv")),
+      " and ", file.path(paths$mdr_tables, paste0(effect_var, "_uic_links_entering_MDR.csv")),
+      call. = FALSE
+    )
+  }
+
   mvd_E <- min(config$mdr_E, ncol(block_mvd))
   if (mvd_E < 1) stop("mvd_E became < 1; inspect block_mvd.", call. = FALSE)
 
@@ -702,6 +728,10 @@ run_mdr_for_effect <- function(effect_var, selected_links, df_model, df_log, con
     )
   })
 
+  if (nrow(edge_coef) == 0) {
+    stop("No MDR edge coefficients were extracted for ", effect_var, ". Check coefficient-column mapping and block_mvd column names.", call. = FALSE)
+  }
+
   save_csv(edge_coef, file.path(paths$mdr_tables, paste0(effect_var, "_MDR_edge_coefficients_long.csv")))
 
   edge_summary <- edge_coef %>%
@@ -795,6 +825,10 @@ save_rds(mdr_results, file.path(paths$mdr_tables, "MDR_results_all_effects.rds")
 
 edge_coef_all <- purrr::map_dfr(mdr_results, "edge_coef")
 edge_summary_all <- purrr::map_dfr(mdr_results, "edge_summary")
+
+if (nrow(edge_coef_all) == 0 || nrow(edge_summary_all) == 0) {
+  stop("MDR S-map completed but no edge-level coefficients were extracted. Inspect *_MDR_coefficient_column_map.csv and *_block_mvd.csv.", call. = FALSE)
+}
 
 # Join UIC information onto MDR summary.
 edge_summary_all <- edge_summary_all %>%
@@ -933,9 +967,9 @@ methods_text <- c(
   paste0(
     "Interaction strength and polarity were estimated using multiview-distance S-map (MDR S-map). ",
     "For each effect subtype, UIC was first performed across the remaining subtypes over lags of ",
-    paste(range(config$tp_range), collapse = " to "),
-    ". UIC links were retained for MDR S-map only when the observed effective transfer entropy exceeded ",
-    "the 95th percentile of the 52-week seasonal surrogate max-statistic distribution and the empirical ",
+    paste(range(abs(config$tp_range)), collapse = " to "),
+    " weeks. UIC links were retained for MDR S-map only when the observed effective transfer entropy exceeded ",
+    "the 95th percentile of the 52-week seasonal surrogate max-statistic distribution and the max-statistic empirical ",
     "surrogate p-value remained significant after Benjamini-Hochberg false-discovery-rate correction. ",
     "The retained UIC links were then used to build the MDR block with make_block_mvd(). Because the MDR S-map ",
     "was fitted as a one-step map, UIC tp values were adjusted by +1 in the block construction so that a selected ",
