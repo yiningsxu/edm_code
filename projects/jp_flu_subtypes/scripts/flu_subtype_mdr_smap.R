@@ -143,7 +143,7 @@ config <- list(
   subtype_vars = c("B", "A_H1N1", "A_H3N2"),
 
   # UIC settings. Primary analysis excludes tp = 0 to avoid contemporaneous seasonal synchrony.
-  E_range = 0:20, # 埋め込み次元またはラグ数候補の範囲(過去何ステップ分の情報を状態空間再構成に使うか、または対象変数の自己履歴をどの程度含めるかに関係します)
+  E_range = 1:20, # 埋め込み次元またはラグ数候補の範囲(過去何ステップ分の情報を状態空間再構成に使うか、または対象変数の自己履歴をどの程度含めるかに関係します)
   tp_range = -12:-1, # 予測ラグの範囲(例えば、 tp=-3 なら「A/H1N1 の 3週前の値」が、現在または1週後の B に関係するか)
   tau = 1, # 予測ステップ数（デフォルトは1, 1週間刻みでラグを取る）
   alpha = 0.05, # 有意水準
@@ -222,7 +222,7 @@ edge_label <- function(cause, effect, lag_weeks = NULL) {
 }
 
 theme_pub <- function(base_size = 14) {
-  cowplot::theme_cowplot(base_size = base_size) +
+  cowplot::theme_cowplot(font_size = base_size) +
     theme(
       plot.title = element_text(face = "bold"),
       axis.title = element_text(face = "bold"),
