@@ -44,9 +44,22 @@ rm(source_edm_bootstrap)
 
 if (!requireNamespace("pacman", quietly = TRUE)) install.packages("pacman")
 pacman::p_load(
-  dplyr, tidyr, purrr, tibble, readr, stringr, forcats, scales,
-  lubridate, ISOweek, ggplot2, cowplot, sinaplot,
-  rUIC, rEDM, grid
+  dplyr, # データ加工
+  tidyr, # データの縦横変換
+  purrr, # 関数型処理、反復処理
+  tibble, # データフレームの拡張
+  readr, # csvなどの読み込み
+  stringr, # 文字列処理
+  forcats, # カテゴリ変数の処理
+  scales, # ggplot の軸・ラベル調整
+  lubridate, # 日付・時刻の操作
+  ISOweek, # ISO週番号の計算
+  ggplot2, # グラフ作成
+  cowplot, # 複数図の結合
+  sinaplot, # データの分布プロット（バイオリンプロット＋点プロット）
+  rUIC, # Unified Information Criterion 関連
+  rEDM, # Empirical Dynamic Modeling
+  grid # 図の細かい制御
 )
 # Load library
 packageVersion("rEDM") # v 0.7.5
@@ -74,6 +87,7 @@ mdr_fun <- function(fun) {
 }
 
 # Compatibility wrapper: macam/macamts >= 0.2.2 uses max_lag; older macamts uses E_effect_var.
+# バージョン差を吸収する wrapper
 make_block_mvd_compat <- function(block, uic_res, effect_var, max_lag, ...) {
   f <- mdr_fun("make_block_mvd")
   dots <- list(...)
@@ -97,13 +111,14 @@ make_block_mvd_compat <- function(block, uic_res, effect_var, max_lag, ...) {
 }
 
 call_mdr_function <- function(fun, ...) {
-  f <- mdr_fun(fun)
-  args <- list(...)
-  formal_names <- names(formals(f))
-  args <- args[names(args) %in% formal_names]
-  do.call(f, args)
+  f <- mdr_fun(fun) # MDR パッケージから関数を取得する
+  args <- list(...) # 渡された引数をリスト化する
+  formal_names <- names(formals(f)) # 関数の引数名を取得する
+  args <- args[names(args) %in% formal_names] # 対応していない引数を削除する
+  do.call(f, args) # 関数を実行する
 }
 
+# MVD 計算結果の形式を統一
 compute_mvd_compat <- function(...) {
   out <- call_mdr_function("compute_mvd", ...)
   if (is.matrix(out) || inherits(out, "dist")) {
@@ -128,19 +143,19 @@ config <- list(
   subtype_vars = c("B", "A_H1N1", "A_H3N2"),
 
   # UIC settings. Primary analysis excludes tp = 0 to avoid contemporaneous seasonal synchrony.
-  E_range = 0:20,
-  tp_range = -12:-1,
-  tau = 1,
-  alpha = 0.05,
-  num_surr = 2000,
-  season_period = 52,
-  random_seed = 1234,
+  E_range = 0:20, # 埋め込み次元またはラグ数候補の範囲(過去何ステップ分の情報を状態空間再構成に使うか、または対象変数の自己履歴をどの程度含めるかに関係します)
+  tp_range = -12:-1, # 予測ラグの範囲(例えば、 tp=-3 なら「A/H1N1 の 3週前の値」が、現在または1週後の B に関係するか)
+  tau = 1, # 予測ステップ数（デフォルトは1, 1週間刻みでラグを取る）
+  alpha = 0.05, # 有意水準
+  num_surr = 2000, # サロゲートデータの数
+  season_period = 52, # 季節周期（季節周期を 52 週に設定、単位はステップ数、日本でのインフルエンザシーズンを考慮）
+  random_seed = 1234, # 乱数シード
 
   # MDR S-map settings.
-  smap_tp = 1,
-  mdr_include_var = "strongest_only", # "strongest_only" is recommended for the main text.
-  mdr_E = 3,
-  n_ssr = 2000,
+  smap_tp = 1, # S-map の予測ターゲットとなる時間ステップ（1週間後の値を予測）
+  mdr_include_var = "strongest_only", # 各効果変数に対して、UICで最も強い関係を示した原因変数だけを MDR S-map に入れる設定
+  mdr_E = 3, # MDR S-map に使用する埋め込み次元：状態空間を構成する際に3次元の情報を使う
+  n_ssr = 2000, # サロゲートデータの数
   k = NULL, # if NULL, floor(sqrt(n_ssr)) is used.
   theta_grid = c(
     0, 1e-4, 3e-4, 1e-3, 3e-3, 1e-2, 3e-2,

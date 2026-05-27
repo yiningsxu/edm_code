@@ -1,3 +1,4 @@
+# プロジェクトのルートディレクトリを自動で見つけ、プロジェクト内のパス管理関数を読み込み、ルートを登録する関数
 source_edm_paths <- function(start = getwd()) {
   find_root <- function(path) {
     current <- normalizePath(path, winslash = "/", mustWork = TRUE)
