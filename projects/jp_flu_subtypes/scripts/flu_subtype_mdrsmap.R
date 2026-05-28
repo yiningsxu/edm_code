@@ -262,6 +262,17 @@ call_mdr_function <- function(fun, ...) {
     f <- mdr_fun(fun) # MDR パッケージから関数を取得する
     args <- list(...) # 渡された引数をリスト化する
     formal_names <- names(formals(f)) # 関数の引数名を取得する
+
+    dropped <- setdiff(names(args), formal_names)
+    if (length(dropped) > 0) {
+        warning(
+            fun, "() does not support argument(s): ",
+            paste(dropped, collapse = ", "),
+            ". These were dropped."
+        )
+    }
+
+
     args <- args[names(args) %in% formal_names] # 対応していない引数を削除する
     do.call(f, args) # 関数を実行する
 }
@@ -1256,635 +1267,633 @@ if (!analysis_has_mdr_links) {
 }
 
 if (analysis_has_mdr_links) {
+    # Combined UIC figure for manuscript Figure 3.
+    log_msg("Building combined UIC Figure 3 from selected links")
+    uic_plot_data <- uic_all %>%
+        semi_join(selected_links %>% select(effect_var, cause_var), by = c("effect_var", "cause_var")) %>%
+        mutate(edge = edge_label(.data$cause_var, .data$effect_var))
 
-# Combined UIC figure for manuscript Figure 3.
-log_msg("Building combined UIC Figure 3 from selected links")
-uic_plot_data <- uic_all %>%
-    semi_join(selected_links %>% select(effect_var, cause_var), by = c("effect_var", "cause_var")) %>%
-    mutate(edge = edge_label(.data$cause_var, .data$effect_var))
+    fig3 <- ggplot(uic_plot_data, aes(x = .data$tp)) +
+        geom_line(aes(y = .data$ete), linewidth = 0.6) +
+        geom_line(aes(y = .data$q95), linetype = "longdash", linewidth = 0.4) +
+        geom_line(aes(y = .data$q90), linetype = "dotted", linewidth = 0.4) +
+        geom_hline(aes(yintercept = .data$q95_global), linetype = "dotdash", linewidth = 0.35) +
+        geom_point(aes(y = .data$ete, shape = .data$sig_primary), size = 2) +
+        scale_shape_manual(values = c(`FALSE` = 1, `TRUE` = 19)) +
+        scale_x_continuous(breaks = config$tp_range) +
+        facet_wrap(~edge, scales = "free_y") +
+        labs(
+            x = "UIC tp; negative values mean that the cause precedes the effect",
+            y = "Effective transfer entropy",
+            shape = "primary significant",
+            title = "Figure 3. UIC with 52-week seasonal surrogate thresholds (no FDR correction)"
+        ) +
+        theme_pub(13)
 
-fig3 <- ggplot(uic_plot_data, aes(x = .data$tp)) +
-    geom_line(aes(y = .data$ete), linewidth = 0.6) +
-    geom_line(aes(y = .data$q95), linetype = "longdash", linewidth = 0.4) +
-    geom_line(aes(y = .data$q90), linetype = "dotted", linewidth = 0.4) +
-    geom_hline(aes(yintercept = .data$q95_global), linetype = "dotdash", linewidth = 0.35) +
-    geom_point(aes(y = .data$ete, shape = .data$sig_primary), size = 2) +
-    scale_shape_manual(values = c(`FALSE` = 1, `TRUE` = 19)) +
-    scale_x_continuous(breaks = config$tp_range) +
-    facet_wrap(~edge, scales = "free_y") +
-    labs(
-        x = "UIC tp; negative values mean that the cause precedes the effect",
-        y = "Effective transfer entropy",
-        shape = "primary significant",
-        title = "Figure 3. UIC with 52-week seasonal surrogate thresholds (no FDR correction)"
-    ) +
-    theme_pub(13)
-
-ggsave(file.path(paths$fig, "Figure3_UIC_seasonal_surrogate_selected_links_noFDR.tiff"), fig3,
-    width = 13, height = 7, dpi = config$dpi, compression = "lzw"
-)
-log_msg("Saved Figure 3: ", file.path(paths$fig, "Figure3_UIC_seasonal_surrogate_selected_links_noFDR.tiff"))
-
-# -----------------------------
-# 6. MDR S-map per effect variable
-# -----------------------------
-log_section("6. MDR S-map per effect variable")
-
-coef_name_map <- function(block_mvd, coef_df) {
-    # In macam/macamts extended_lnlp, c_1 corresponds to the first block column,
-    # c_2 to the second block column, etc. c_0, if present, is the intercept.
-    tibble(
-        block_col = names(block_mvd),
-        coef_col = paste0("c_", seq_along(names(block_mvd))),
-        exists = paste0("c_", seq_along(names(block_mvd))) %in% names(coef_df)
+    ggsave(file.path(paths$fig, "Figure3_UIC_seasonal_surrogate_selected_links_noFDR.tiff"), fig3,
+        width = 13, height = 7, dpi = config$dpi, compression = "lzw"
     )
-}
+    log_msg("Saved Figure 3: ", file.path(paths$fig, "Figure3_UIC_seasonal_surrogate_selected_links_noFDR.tiff"))
 
-coef_dates <- function(coef_df, df_log) {
-    if ("time" %in% names(coef_df)) {
-        idx <- suppressWarnings(as.integer(coef_df$time))
-    } else {
-        idx <- seq_len(nrow(coef_df))
+    # -----------------------------
+    # 6. MDR S-map per effect variable
+    # -----------------------------
+    log_section("6. MDR S-map per effect variable")
+
+    coef_name_map <- function(block_mvd, coef_df) {
+        # In macam/macamts extended_lnlp, c_1 corresponds to the first block column,
+        # c_2 to the second block column, etc. c_0, if present, is the intercept.
+        tibble(
+            block_col = names(block_mvd),
+            coef_col = paste0("c_", seq_along(names(block_mvd))),
+            exists = paste0("c_", seq_along(names(block_mvd))) %in% names(coef_df)
+        )
     }
-    idx[!is.finite(idx) | idx < 1 | idx > nrow(df_log)] <- NA_integer_
-    df_log$Date[idx]
-}
 
-pred_dates <- function(pred_df, df_log) {
-    if ("time" %in% names(pred_df)) {
-        idx <- suppressWarnings(as.integer(pred_df$time))
-    } else {
-        idx <- seq_len(nrow(pred_df))
+    coef_dates <- function(coef_df, df_log) {
+        if ("time" %in% names(coef_df)) {
+            idx <- suppressWarnings(as.integer(coef_df$time))
+        } else {
+            idx <- seq_len(nrow(coef_df))
+        }
+        idx[!is.finite(idx) | idx < 1 | idx > nrow(df_log)] <- NA_integer_
+        df_log$Date[idx]
     }
-    idx[!is.finite(idx) | idx < 1 | idx > nrow(df_log)] <- NA_integer_
-    df_log$Date[idx]
-}
 
-run_mdr_for_effect <- function(effect_var, selected_links, df_model, df_log, config, paths, effect_id = NULL, total_effects = NULL) {
-    effect_start <- Sys.time()
-    effect_prefix <- if (!is.null(effect_id) && !is.null(total_effects)) {
-        paste0("effect ", effect_id, "/", total_effects, ": ")
-    } else {
-        ""
+    pred_dates <- function(pred_df, df_log) {
+        if ("time" %in% names(pred_df)) {
+            idx <- suppressWarnings(as.integer(pred_df$time))
+        } else {
+            idx <- seq_len(nrow(pred_df))
+        }
+        idx[!is.finite(idx) | idx < 1 | idx > nrow(df_log)] <- NA_integer_
+        df_log$Date[idx]
     }
-    log_msg("MDR S-map started: ", effect_prefix, "effect = ", effect_var)
-    log_progress("mdr_effect_started", effect_var, paste0(effect_prefix, "effect = ", effect_var))
 
-    links_eff <- selected_links %>% filter(.data$effect_var == effect_var)
-    if (nrow(links_eff) == 0) {
-        log_msg("No selected UIC links for effect = ", effect_var, "; skipping MDR", level = "WARN")
-        log_progress("mdr_effect_skipped", effect_var, "No selected UIC links")
-        return(NULL)
-    }
-    log_msg("MDR links for ", effect_var, ": ", nrow(links_eff))
-    print(links_eff %>% select(effect_var, cause_var, tp, lag_weeks, ete, p_global))
+    run_mdr_for_effect <- function(effect_var, selected_links, df_model, df_log, config, paths, effect_id = NULL, total_effects = NULL) {
+        effect_start <- Sys.time()
+        effect_prefix <- if (!is.null(effect_id) && !is.null(total_effects)) {
+            paste0("effect ", effect_id, "/", total_effects, ": ")
+        } else {
+            ""
+        }
+        log_msg("MDR S-map started: ", effect_prefix, "effect = ", effect_var)
+        log_progress("mdr_effect_started", effect_var, paste0(effect_prefix, "effect = ", effect_var))
 
-    # Estimate effect-variable embedding dimension for the effect-history part of block_mvd.
-    log_msg("Running simplex to choose effect-history embedding for ", effect_var)
-    simp_x <- rUIC::simplex(
-        df_model,
-        lib_var = effect_var,
-        E = config$E_range,
-        tp = config$smap_tp,
-        num_surr = config$uic_internal_num_surr
-    )
-    simp_x <- as_tibble(simp_x)
-    Ex <- simp_x[which.min(simp_x$rmse), "E", drop = TRUE]
-    Ex <- max(1, as.integer(Ex))
-    save_csv(simp_x, file.path(paths$mdr_tables, paste0(effect_var, "_simplex_for_effect_embedding.csv")))
-    log_msg("Simplex completed for ", effect_var, ": selected Ex = ", Ex)
+        links_eff <- selected_links %>% filter(.data$effect_var == effect_var)
+        if (nrow(links_eff) == 0) {
+            log_msg("No selected UIC links for effect = ", effect_var, "; skipping MDR", level = "WARN")
+            log_progress("mdr_effect_skipped", effect_var, "No selected UIC links")
+            return(NULL)
+        }
+        log_msg("MDR links for ", effect_var, ": ", nrow(links_eff))
+        print(links_eff %>% select(effect_var, cause_var, tp, lag_weeks, ete, p_global))
 
-    # Critical: make_block_mvd() internally filters on the column named 'pval'.
-    # Therefore pval is replaced by the unadjusted global surrogate p-value for MDR block construction.
-    uic_for_block <- links_eff %>%
-        transmute(
-            effect_var = .data$effect_var,
-            cause_var = .data$cause_var,
-            E = .data$E,
-            tp = .data$tp,
-            te = .data$te,
-            ete = .data$ete,
-            pval_raw_uic = .data$pval_raw_uic,
-            p_global = .data$p_global,
-            pval = .data$p_global,
-            q95_global = .data$q95_global,
-            lag_weeks = .data$lag_weeks,
-            edge = .data$edge
+        # Estimate effect-variable embedding dimension for the effect-history part of block_mvd.
+        log_msg("Running simplex to choose effect-history embedding for ", effect_var)
+        simp_x <- rUIC::simplex(
+            df_model,
+            lib_var = effect_var,
+            E = config$E_range,
+            tp = config$smap_tp,
+            num_surr = config$uic_internal_num_surr
+        )
+        simp_x <- as_tibble(simp_x)
+        Ex <- simp_x[which.min(simp_x$rmse), "E", drop = TRUE]
+        Ex <- max(1, as.integer(Ex))
+        save_csv(simp_x, file.path(paths$mdr_tables, paste0(effect_var, "_simplex_for_effect_embedding.csv")))
+        log_msg("Simplex completed for ", effect_var, ": selected Ex = ", Ex)
+
+        # Critical: make_block_mvd() internally filters on the column named 'pval'.
+        # Therefore pval is replaced by the unadjusted global surrogate p-value for MDR block construction.
+        uic_for_block <- links_eff %>%
+            transmute(
+                effect_var = .data$effect_var,
+                cause_var = .data$cause_var,
+                E = .data$E,
+                tp = .data$tp,
+                te = .data$te,
+                ete = .data$ete,
+                pval_raw_uic = .data$pval_raw_uic,
+                p_global = .data$p_global,
+                pval = .data$p_global,
+                q95_global = .data$q95_global,
+                lag_weeks = .data$lag_weeks,
+                edge = .data$edge
+            )
+
+        save_csv(uic_for_block, file.path(paths$mdr_tables, paste0(effect_var, "_uic_links_entering_MDR.csv")))
+        log_msg("Saved MDR input UIC links for ", effect_var)
+
+        # tp_adjust keeps the UIC lag interpretation consistent with the one-step S-map.
+        # Example: UIC tp = -9 and S-map tp = 1 -> use cause_tp-8, so the target effect(t+1)
+        # is paired with cause(t-8), preserving a 9-week cause-to-effect lag.
+        log_msg("Building MDR block_mvd for ", effect_var, " using make_block_mvd()")
+        block_mvd <- make_block_mvd_compat(
+            block = df_model,
+            uic_res = as.data.frame(uic_for_block),
+            effect_var = effect_var,
+            max_lag = Ex,
+            cause_var_colname = "cause_var",
+            include_var = config$mdr_include_var,
+            p_threshold = config$alpha,
+            tp_adjust = config$smap_tp,
+            sort_tp = TRUE,
+            silent = FALSE
         )
 
-    save_csv(uic_for_block, file.path(paths$mdr_tables, paste0(effect_var, "_uic_links_entering_MDR.csv")))
-    log_msg("Saved MDR input UIC links for ", effect_var)
-
-    # tp_adjust keeps the UIC lag interpretation consistent with the one-step S-map.
-    # Example: UIC tp = -9 and S-map tp = 1 -> use cause_tp-8, so the target effect(t+1)
-    # is paired with cause(t-8), preserving a 9-week cause-to-effect lag.
-    log_msg("Building MDR block_mvd for ", effect_var, " using make_block_mvd()")
-    block_mvd <- make_block_mvd_compat(
-        block = df_model,
-        uic_res = as.data.frame(uic_for_block),
-        effect_var = effect_var,
-        max_lag = Ex,
-        cause_var_colname = "cause_var",
-        include_var = config$mdr_include_var,
-        p_threshold = config$alpha,
-        tp_adjust = config$smap_tp,
-        sort_tp = TRUE,
-        silent = FALSE
-    )
-
-    block_mvd_path <- file.path(paths$mdr_tables, paste0(effect_var, "_block_mvd.csv"))
-    save_csv(as_tibble(block_mvd), block_mvd_path)
-    log_msg(
-        "MDR block_mvd created for ", effect_var,
-        ": ", nrow(block_mvd), " rows x ", ncol(block_mvd), " columns"
-    )
-    log_progress("mdr_block_saved", effect_var, paste0(ncol(block_mvd), " block columns"), block_mvd_path)
-
-    mvd_E <- min(config$mdr_E, ncol(block_mvd))
-    if (mvd_E < 1) stop("mvd_E became < 1; inspect block_mvd.", call. = FALSE)
-    log_msg(
-        "Computing multiview distance for ", effect_var,
-        " (E = ", mvd_E, ", n_ssr = ", config$n_ssr, ", k = ", config$k, ")"
-    )
-
-    dist_info <- compute_mvd_compat(
-        block_mvd = block_mvd,
-        effect_var = effect_var,
-        E = mvd_E,
-        tp = config$smap_tp,
-        n_ssr = config$n_ssr,
-        k = config$k,
-        random_seed = config$random_seed,
-        distance_only = FALSE,
-        silent = FALSE
-    )
-    multiview_dist <- dist_info$multiview_dist
-    save_rds(dist_info, file.path(paths$mdr_tables, paste0(effect_var, "_multiview_distance_and_embeddings.rds")))
-    log_msg(
-        "Multiview distance completed for ", effect_var,
-        ": matrix ", nrow(multiview_dist), " x ", ncol(multiview_dist)
-    )
-
-    param_grid <- expand.grid(
-        theta = config$theta_grid,
-        lambda = config$lambda_grid,
-        KEEP.OUT.ATTRS = FALSE,
-        stringsAsFactors = FALSE
-    )
-    log_msg(
-        "Starting MDR theta/lambda search for ", effect_var,
-        ": ", nrow(param_grid), " parameter combinations"
-    )
-
-    effect_checkpoint_dir <- safe_dir(file.path(paths$mdr_checkpoints, effect_var))
-    param_results <- vector("list", nrow(param_grid))
-    for (param_id in seq_len(nrow(param_grid))) {
-        theta <- param_grid$theta[[param_id]]
-        lambda <- param_grid$lambda[[param_id]]
+        block_mvd_path <- file.path(paths$mdr_tables, paste0(effect_var, "_block_mvd.csv"))
+        save_csv(as_tibble(block_mvd), block_mvd_path)
         log_msg(
-            "MDR parameter search ", effect_var,
-            ": ", param_id, "/", nrow(param_grid),
-            " theta = ", theta, ", lambda = ", lambda
+            "MDR block_mvd created for ", effect_var,
+            ": ", nrow(block_mvd), " rows x ", ncol(block_mvd), " columns"
         )
-        fit <- s_map_mdr_compat(
+        log_progress("mdr_block_saved", effect_var, paste0(ncol(block_mvd), " block columns"), block_mvd_path)
+
+        mvd_E <- min(config$mdr_E, ncol(block_mvd))
+        if (mvd_E < 1) stop("mvd_E became < 1; inspect block_mvd.", call. = FALSE)
+        log_msg(
+            "Computing multiview distance for ", effect_var,
+            " (E = ", mvd_E, ", n_ssr = ", config$n_ssr, ", k = ", config$k, ")"
+        )
+
+        dist_info <- compute_mvd_compat(
+            block_mvd = block_mvd,
+            effect_var = effect_var,
+            E = mvd_E,
+            tp = config$smap_tp,
+            n_ssr = config$n_ssr,
+            k = config$k,
+            random_seed = config$random_seed,
+            distance_only = FALSE,
+            silent = FALSE
+        )
+        multiview_dist <- dist_info$multiview_dist
+        save_rds(dist_info, file.path(paths$mdr_tables, paste0(effect_var, "_multiview_distance_and_embeddings.rds")))
+        log_msg(
+            "Multiview distance completed for ", effect_var,
+            ": matrix ", nrow(multiview_dist), " x ", ncol(multiview_dist)
+        )
+
+        param_grid <- expand.grid(
+            theta = config$theta_grid,
+            lambda = config$lambda_grid,
+            KEEP.OUT.ATTRS = FALSE,
+            stringsAsFactors = FALSE
+        )
+        log_msg(
+            "Starting MDR theta/lambda search for ", effect_var,
+            ": ", nrow(param_grid), " parameter combinations"
+        )
+
+        effect_checkpoint_dir <- safe_dir(file.path(paths$mdr_checkpoints, effect_var))
+        param_results <- vector("list", nrow(param_grid))
+        for (param_id in seq_len(nrow(param_grid))) {
+            theta <- param_grid$theta[[param_id]]
+            lambda <- param_grid$lambda[[param_id]]
+            log_msg(
+                "MDR parameter search ", effect_var,
+                ": ", param_id, "/", nrow(param_grid),
+                " theta = ", theta, ", lambda = ", lambda
+            )
+            fit <- s_map_mdr_compat(
+                block_mvd = block_mvd,
+                dist_w = multiview_dist,
+                tp = config$smap_tp,
+                theta = theta,
+                regularized = config$ridge_regularized_mdr,
+                lambda = lambda,
+                alpha = config$alpha_glmnet,
+                save_smap_coefficients = FALSE,
+                random_seed = config$random_seed
+            )
+            fit_stats <- as_tibble(fit$stats) %>% mutate(theta = theta, lambda = lambda)
+            param_results[[param_id]] <- fit_stats
+            log_msg(
+                "MDR parameter result ", effect_var,
+                ": theta = ", theta,
+                ", rho = ", signif(fit_stats$rho[[1]], 4),
+                ", rmse = ", signif(fit_stats$rmse[[1]], 4)
+            )
+            if (isTRUE(config$save_intermediate)) {
+                param_checkpoint_path <- file.path(effect_checkpoint_dir, paste0(effect_var, "_MDR_parameter_", sprintf("%03d", param_id), ".csv"))
+                save_csv(fit_stats, param_checkpoint_path)
+                param_partial <- bind_rows(param_results[seq_len(param_id)]) %>%
+                    select(any_of(c("N", "theta", "lambda", "rho", "mae", "rmse")), everything())
+                save_csv(param_partial, file.path(effect_checkpoint_dir, paste0(effect_var, "_MDR_parameter_search_partial_latest.csv")))
+                log_msg("Saved MDR parameter-search checkpoint for ", effect_var, ": ", param_id, "/", nrow(param_grid))
+                log_progress(
+                    "mdr_parameter_checkpoint_saved",
+                    effect_var,
+                    paste0("parameter ", param_id, "/", nrow(param_grid)),
+                    param_checkpoint_path
+                )
+            }
+        }
+        param_res <- bind_rows(param_results) %>%
+            select(any_of(c("N", "theta", "lambda", "rho", "mae", "rmse")), everything())
+        rm(param_results)
+
+        param_res_path <- file.path(paths$mdr_tables, paste0(effect_var, "_MDR_parameter_search.csv"))
+        save_csv(param_res, param_res_path)
+        log_msg("Saved MDR parameter search table for ", effect_var)
+        log_progress("mdr_parameter_search_saved", effect_var, paste0(nrow(param_res), " parameter rows"), param_res_path)
+
+        best <- param_res %>%
+            filter(is.finite(.data$rmse)) %>%
+            arrange(.data$rmse, desc(.data$rho)) %>%
+            slice(1)
+        if (nrow(best) == 0) stop("No valid MDR parameter result for ", effect_var, call. = FALSE)
+        log_msg(
+            "Best MDR parameters for ", effect_var,
+            ": theta = ", best$theta[[1]],
+            ", lambda = ", best$lambda[[1]],
+            ", rho = ", signif(best$rho[[1]], 4),
+            ", rmse = ", signif(best$rmse[[1]], 4)
+        )
+
+        log_msg("Running final MDR S-map with coefficient export for ", effect_var)
+        final_fit <- s_map_mdr_compat(
             block_mvd = block_mvd,
             dist_w = multiview_dist,
             tp = config$smap_tp,
-            theta = theta,
+            theta = best$theta[[1]],
             regularized = config$ridge_regularized_mdr,
-            lambda = lambda,
+            lambda = best$lambda[[1]],
             alpha = config$alpha_glmnet,
-            save_smap_coefficients = FALSE,
+            save_smap_coefficients = TRUE,
             random_seed = config$random_seed
         )
-        fit_stats <- as_tibble(fit$stats) %>% mutate(theta = theta, lambda = lambda)
-        param_results[[param_id]] <- fit_stats
+
+        save_rds(final_fit, file.path(paths$mdr_tables, paste0(effect_var, "_MDR_final_fit.rds")))
+        log_msg("Saved final MDR fit RDS for ", effect_var)
+
+        pred <- as_tibble(final_fit$model_output) %>%
+            mutate(Date = pred_dates(., df_log), effect_var = effect_var) %>%
+            relocate(Date, effect_var)
+        coefs <- as_tibble(final_fit$smap_coefficients) %>%
+            mutate(Date = coef_dates(., df_log), effect_var = effect_var) %>%
+            relocate(Date, effect_var)
+
+        save_csv(pred, file.path(paths$mdr_tables, paste0(effect_var, "_MDR_prediction.csv")))
+        save_csv(coefs, file.path(paths$mdr_tables, paste0(effect_var, "_MDR_coefficients_raw.csv")))
         log_msg(
-            "MDR parameter result ", effect_var,
-            ": theta = ", theta,
-            ", rho = ", signif(fit_stats$rho[[1]], 4),
-            ", rmse = ", signif(fit_stats$rmse[[1]], 4)
+            "Saved MDR predictions and raw coefficients for ", effect_var,
+            ": predictions = ", nrow(pred), " rows; coefficients = ", nrow(coefs), " rows"
         )
-        if (isTRUE(config$save_intermediate)) {
-            param_checkpoint_path <- file.path(effect_checkpoint_dir, paste0(effect_var, "_MDR_parameter_", sprintf("%03d", param_id), ".csv"))
-            save_csv(fit_stats, param_checkpoint_path)
-            param_partial <- bind_rows(param_results[seq_len(param_id)]) %>%
-                select(any_of(c("N", "theta", "lambda", "rho", "mae", "rmse")), everything())
-            save_csv(param_partial, file.path(effect_checkpoint_dir, paste0(effect_var, "_MDR_parameter_search_partial_latest.csv")))
-            log_msg("Saved MDR parameter-search checkpoint for ", effect_var, ": ", param_id, "/", nrow(param_grid))
-            log_progress(
-                "mdr_parameter_checkpoint_saved",
-                effect_var,
-                paste0("parameter ", param_id, "/", nrow(param_grid)),
-                param_checkpoint_path
+
+        cmap <- coef_name_map(block_mvd, coefs)
+        save_csv(cmap, file.path(paths$mdr_tables, paste0(effect_var, "_MDR_coefficient_column_map.csv")))
+        if (any(!cmap$exists)) {
+            warning(
+                "Some expected coefficient columns were not found for ", effect_var, ": ",
+                paste(cmap$coef_col[!cmap$exists], collapse = ", ")
             )
         }
-    }
-    param_res <- bind_rows(param_results) %>%
-        select(any_of(c("N", "theta", "lambda", "rho", "mae", "rmse")), everything())
-    rm(param_results)
+        log_msg("Mapped MDR coefficient columns for ", effect_var)
 
-    param_res_path <- file.path(paths$mdr_tables, paste0(effect_var, "_MDR_parameter_search.csv"))
-    save_csv(param_res, param_res_path)
-    log_msg("Saved MDR parameter search table for ", effect_var)
-    log_progress("mdr_parameter_search_saved", effect_var, paste0(nrow(param_res), " parameter rows"), param_res_path)
+        log_msg("Extracting edge-specific MDR coefficients for ", effect_var)
+        edge_coef <- purrr::map_dfr(seq_len(nrow(uic_for_block)), function(i) {
+            link <- uic_for_block[i, ]
+            adjusted_tp <- link$tp + config$smap_tp
+            block_col <- paste0(link$cause_var, "_tp", adjusted_tp)
+            coef_col <- cmap$coef_col[match(block_col, cmap$block_col)]
 
-    best <- param_res %>%
-        filter(is.finite(.data$rmse)) %>%
-        arrange(.data$rmse, desc(.data$rho)) %>%
-        slice(1)
-    if (nrow(best) == 0) stop("No valid MDR parameter result for ", effect_var, call. = FALSE)
-    log_msg(
-        "Best MDR parameters for ", effect_var,
-        ": theta = ", best$theta[[1]],
-        ", lambda = ", best$lambda[[1]],
-        ", rho = ", signif(best$rho[[1]], 4),
-        ", rmse = ", signif(best$rmse[[1]], 4)
-    )
+            if (length(coef_col) == 0 || is.na(coef_col) || !(coef_col %in% names(coefs))) {
+                warning("Coefficient for ", link$edge, " not found. Expected block column: ", block_col)
+                return(tibble())
+            }
 
-    log_msg("Running final MDR S-map with coefficient export for ", effect_var)
-    final_fit <- s_map_mdr_compat(
-        block_mvd = block_mvd,
-        dist_w = multiview_dist,
-        tp = config$smap_tp,
-        theta = best$theta[[1]],
-        regularized = config$ridge_regularized_mdr,
-        lambda = best$lambda[[1]],
-        alpha = config$alpha_glmnet,
-        save_smap_coefficients = TRUE,
-        random_seed = config$random_seed
-    )
+            coef_values <- coefs[[coef_col]]
+            tibble(
+                Date = coefs$Date,
+                effect_var = link$effect_var,
+                cause_var = link$cause_var,
+                edge = link$edge,
+                lag_weeks = link$lag_weeks,
+                uic_tp = link$tp,
+                mdr_block_col = block_col,
+                coef_col = coef_col,
+                coef_value = coef_values
+            )
+        })
 
-    save_rds(final_fit, file.path(paths$mdr_tables, paste0(effect_var, "_MDR_final_fit.rds")))
-    log_msg("Saved final MDR fit RDS for ", effect_var)
-
-    pred <- as_tibble(final_fit$model_output) %>%
-        mutate(Date = pred_dates(., df_log), effect_var = effect_var) %>%
-        relocate(Date, effect_var)
-    coefs <- as_tibble(final_fit$smap_coefficients) %>%
-        mutate(Date = coef_dates(., df_log), effect_var = effect_var) %>%
-        relocate(Date, effect_var)
-
-    save_csv(pred, file.path(paths$mdr_tables, paste0(effect_var, "_MDR_prediction.csv")))
-    save_csv(coefs, file.path(paths$mdr_tables, paste0(effect_var, "_MDR_coefficients_raw.csv")))
-    log_msg(
-        "Saved MDR predictions and raw coefficients for ", effect_var,
-        ": predictions = ", nrow(pred), " rows; coefficients = ", nrow(coefs), " rows"
-    )
-
-    cmap <- coef_name_map(block_mvd, coefs)
-    save_csv(cmap, file.path(paths$mdr_tables, paste0(effect_var, "_MDR_coefficient_column_map.csv")))
-    if (any(!cmap$exists)) {
-        warning(
-            "Some expected coefficient columns were not found for ", effect_var, ": ",
-            paste(cmap$coef_col[!cmap$exists], collapse = ", ")
-        )
-    }
-    log_msg("Mapped MDR coefficient columns for ", effect_var)
-
-    log_msg("Extracting edge-specific MDR coefficients for ", effect_var)
-    edge_coef <- purrr::map_dfr(seq_len(nrow(uic_for_block)), function(i) {
-        link <- uic_for_block[i, ]
-        adjusted_tp <- link$tp + config$smap_tp
-        block_col <- paste0(link$cause_var, "_tp", adjusted_tp)
-        coef_col <- cmap$coef_col[match(block_col, cmap$block_col)]
-
-        if (length(coef_col) == 0 || is.na(coef_col) || !(coef_col %in% names(coefs))) {
-            warning("Coefficient for ", link$edge, " not found. Expected block column: ", block_col)
-            return(tibble())
+        save_csv(edge_coef, file.path(paths$mdr_tables, paste0(effect_var, "_MDR_edge_coefficients_long.csv")))
+        log_msg("Saved edge coefficient long table for ", effect_var, ": ", nrow(edge_coef), " rows")
+        if (nrow(edge_coef) == 0) {
+            stop(
+                "No MDR edge coefficients were extracted for ", effect_var,
+                ". Check the block_mvd column names and coefficient map table.",
+                call. = FALSE
+            )
         }
 
-        coef_values <- coefs[[coef_col]]
-        tibble(
-            Date = coefs$Date,
-            effect_var = link$effect_var,
-            cause_var = link$cause_var,
-            edge = link$edge,
-            lag_weeks = link$lag_weeks,
-            uic_tp = link$tp,
-            mdr_block_col = block_col,
-            coef_col = coef_col,
-            coef_value = coef_values
-        )
-    })
+        edge_summary <- edge_coef %>%
+            group_by(.data$effect_var, .data$cause_var, .data$edge, .data$lag_weeks, .data$uic_tp, .data$mdr_block_col, .data$coef_col) %>%
+            summarise(
+                n_coef = sum(is.finite(.data$coef_value)),
+                coef_mean = mean(.data$coef_value, na.rm = TRUE),
+                coef_median = median(.data$coef_value, na.rm = TRUE),
+                coef_sd = sd(.data$coef_value, na.rm = TRUE),
+                coef_q25 = quantile(.data$coef_value, 0.25, na.rm = TRUE, names = FALSE),
+                coef_q75 = quantile(.data$coef_value, 0.75, na.rm = TRUE, names = FALSE),
+                prop_positive = mean(.data$coef_value > 0, na.rm = TRUE),
+                prop_negative = mean(.data$coef_value < 0, na.rm = TRUE),
+                .groups = "drop"
+            ) %>%
+            mutate(
+                polarity = case_when(
+                    .data$coef_median > 0 ~ "positive",
+                    .data$coef_median < 0 ~ "negative",
+                    TRUE ~ "near_zero"
+                ),
+                effect_embedding_E = Ex,
+                mdr_E = mvd_E,
+                theta = best$theta[[1]],
+                lambda = best$lambda[[1]],
+                rho = best$rho[[1]],
+                mae = if ("mae" %in% names(best)) best$mae[[1]] else NA_real_,
+                rmse = best$rmse[[1]],
+                regularized = config$ridge_regularized_mdr
+            )
 
-    save_csv(edge_coef, file.path(paths$mdr_tables, paste0(effect_var, "_MDR_edge_coefficients_long.csv")))
-    log_msg("Saved edge coefficient long table for ", effect_var, ": ", nrow(edge_coef), " rows")
-    if (nrow(edge_coef) == 0) {
-        stop(
-            "No MDR edge coefficients were extracted for ", effect_var,
-            ". Check the block_mvd column names and coefficient map table.",
-            call. = FALSE
-        )
-    }
+        edge_summary_path <- file.path(paths$mdr_tables, paste0(effect_var, "_MDR_edge_summary.csv"))
+        save_csv(edge_summary, edge_summary_path)
+        log_msg("Saved edge summary for ", effect_var, ": ", nrow(edge_summary), " rows")
+        log_progress("mdr_edge_summary_saved", effect_var, paste0(nrow(edge_summary), " edge summary rows"), edge_summary_path)
+        print(edge_summary %>% select(effect_var, cause_var, lag_weeks, coef_median, prop_positive, polarity, theta, rho, rmse))
 
-    edge_summary <- edge_coef %>%
-        group_by(.data$effect_var, .data$cause_var, .data$edge, .data$lag_weeks, .data$uic_tp, .data$mdr_block_col, .data$coef_col) %>%
-        summarise(
-            n_coef = sum(is.finite(.data$coef_value)),
-            coef_mean = mean(.data$coef_value, na.rm = TRUE),
-            coef_median = median(.data$coef_value, na.rm = TRUE),
-            coef_sd = sd(.data$coef_value, na.rm = TRUE),
-            coef_q25 = quantile(.data$coef_value, 0.25, na.rm = TRUE, names = FALSE),
-            coef_q75 = quantile(.data$coef_value, 0.75, na.rm = TRUE, names = FALSE),
-            prop_positive = mean(.data$coef_value > 0, na.rm = TRUE),
-            prop_negative = mean(.data$coef_value < 0, na.rm = TRUE),
-            .groups = "drop"
-        ) %>%
-        mutate(
-            polarity = case_when(
-                .data$coef_median > 0 ~ "positive",
-                .data$coef_median < 0 ~ "negative",
-                TRUE ~ "near_zero"
-            ),
-            effect_embedding_E = Ex,
-            mdr_E = mvd_E,
-            theta = best$theta[[1]],
-            lambda = best$lambda[[1]],
-            rho = best$rho[[1]],
-            mae = if ("mae" %in% names(best)) best$mae[[1]] else NA_real_,
-            rmse = best$rmse[[1]],
-            regularized = config$ridge_regularized_mdr
-        )
-
-    edge_summary_path <- file.path(paths$mdr_tables, paste0(effect_var, "_MDR_edge_summary.csv"))
-    save_csv(edge_summary, edge_summary_path)
-    log_msg("Saved edge summary for ", effect_var, ": ", nrow(edge_summary), " rows")
-    log_progress("mdr_edge_summary_saved", effect_var, paste0(nrow(edge_summary), " edge summary rows"), edge_summary_path)
-    print(edge_summary %>% select(effect_var, cause_var, lag_weeks, coef_median, prop_positive, polarity, theta, rho, rmse))
-
-    # Per-effect diagnostic plot: observed vs predicted.
-    log_msg("Saving MDR observed-vs-predicted plot for ", effect_var)
-    p_obs_pred <- ggplot(pred, aes(x = .data$obs, y = .data$pred)) +
-        geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
-        geom_point(alpha = 0.65, size = 1.7, na.rm = TRUE) +
-        coord_equal() +
-        labs(
-            title = paste0("MDR S-map prediction: ", subtype_label(effect_var)),
-            subtitle = paste0(
-                "theta = ", signif(best$theta[[1]], 3),
-                ", rho = ", signif(best$rho[[1]], 3),
-                ", RMSE = ", signif(best$rmse[[1]], 3)
-            ),
-            x = "Observed log(x+1)",
-            y = "Predicted log(x+1)"
-        ) +
-        theme_pub(13)
-    ggsave(file.path(paths$mdr_fig, paste0(effect_var, "_MDR_observed_vs_predicted.tiff")), p_obs_pred,
-        width = 7, height = 6, dpi = config$dpi, compression = "lzw"
-    )
-
-    # Per-effect coefficient time series.
-    if (nrow(edge_coef) > 0) {
-        log_msg("Saving MDR coefficient time-series plot for ", effect_var)
-        p_coef_ts <- ggplot(edge_coef, aes(x = .data$Date, y = .data$coef_value)) +
-            geom_hline(yintercept = 0, linetype = "dashed") +
-            geom_line(linewidth = 0.5, na.rm = TRUE) +
-            facet_wrap(~edge, scales = "free_y", ncol = 1) +
+        # Per-effect diagnostic plot: observed vs predicted.
+        log_msg("Saving MDR observed-vs-predicted plot for ", effect_var)
+        p_obs_pred <- ggplot(pred, aes(x = .data$obs, y = .data$pred)) +
+            geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+            geom_point(alpha = 0.65, size = 1.7, na.rm = TRUE) +
+            coord_equal() +
             labs(
-                title = paste0("Time-varying MDR S-map coefficients for ", subtype_label(effect_var)),
-                x = NULL,
-                y = "MDR S-map coefficient on log(x+1) scale"
+                title = paste0("MDR S-map prediction: ", subtype_label(effect_var)),
+                subtitle = paste0(
+                    "theta = ", signif(best$theta[[1]], 3),
+                    ", rho = ", signif(best$rho[[1]], 3),
+                    ", RMSE = ", signif(best$rmse[[1]], 3)
+                ),
+                x = "Observed log(x+1)",
+                y = "Predicted log(x+1)"
             ) +
             theme_pub(13)
-        ggsave(file.path(paths$mdr_fig, paste0(effect_var, "_MDR_edge_coefficients_timeseries.tiff")), p_coef_ts,
-            width = 11, height = 4 + 2.5 * length(unique(edge_coef$edge)), dpi = config$dpi, compression = "lzw"
+        ggsave(file.path(paths$mdr_fig, paste0(effect_var, "_MDR_observed_vs_predicted.tiff")), p_obs_pred,
+            width = 7, height = 6, dpi = config$dpi, compression = "lzw"
+        )
+
+        # Per-effect coefficient time series.
+        if (nrow(edge_coef) > 0) {
+            log_msg("Saving MDR coefficient time-series plot for ", effect_var)
+            p_coef_ts <- ggplot(edge_coef, aes(x = .data$Date, y = .data$coef_value)) +
+                geom_hline(yintercept = 0, linetype = "dashed") +
+                geom_line(linewidth = 0.5, na.rm = TRUE) +
+                facet_wrap(~edge, scales = "free_y", ncol = 1) +
+                labs(
+                    title = paste0("Time-varying MDR S-map coefficients for ", subtype_label(effect_var)),
+                    x = NULL,
+                    y = "MDR S-map coefficient on log(x+1) scale"
+                ) +
+                theme_pub(13)
+            ggsave(file.path(paths$mdr_fig, paste0(effect_var, "_MDR_edge_coefficients_timeseries.tiff")), p_coef_ts,
+                width = 11, height = 4 + 2.5 * length(unique(edge_coef$edge)), dpi = config$dpi, compression = "lzw"
+            )
+        }
+        log_msg("MDR S-map completed for ", effect_var, " (elapsed ", format_elapsed(effect_start), ")")
+        log_progress("mdr_effect_completed", effect_var, paste0("elapsed ", format_elapsed(effect_start)))
+
+        list(
+            effect_var = effect_var,
+            Ex = Ex,
+            block_mvd = block_mvd,
+            dist_info = dist_info,
+            param_res = param_res,
+            best = best,
+            pred = pred,
+            coefs = coefs,
+            coef_map = cmap,
+            edge_coef = edge_coef,
+            edge_summary = edge_summary
         )
     }
-    log_msg("MDR S-map completed for ", effect_var, " (elapsed ", format_elapsed(effect_start), ")")
-    log_progress("mdr_effect_completed", effect_var, paste0("elapsed ", format_elapsed(effect_start)))
 
-    list(
-        effect_var = effect_var,
-        Ex = Ex,
-        block_mvd = block_mvd,
-        dist_info = dist_info,
-        param_res = param_res,
-        best = best,
-        pred = pred,
-        coefs = coefs,
-        coef_map = cmap,
-        edge_coef = edge_coef,
-        edge_summary = edge_summary
+    mdr_effect_vars <- unique(selected_links$effect_var)
+    log_msg("MDR effect plan: ", length(mdr_effect_vars), " effect variable(s): ", paste(mdr_effect_vars, collapse = ", "))
+    mdr_results <- purrr::map(seq_along(mdr_effect_vars), function(i) {
+        effect_var <- mdr_effect_vars[[i]]
+        run_mdr_for_effect(
+            effect_var = effect_var,
+            selected_links = selected_links,
+            df_model = df_model,
+            df_log = df_log,
+            config = config,
+            paths = paths,
+            effect_id = i,
+            total_effects = length(mdr_effect_vars)
+        )
+    })
+    names(mdr_results) <- mdr_effect_vars
+    mdr_results <- purrr::compact(mdr_results)
+    if (length(mdr_results) == 0) {
+        stop("No MDR S-map results were generated. Inspect selected UIC links and MDR logs.", call. = FALSE)
+    }
+    save_rds(mdr_results, file.path(paths$mdr_tables, "MDR_results_all_effects.rds"))
+    log_msg("Saved all MDR results RDS: ", file.path(paths$mdr_tables, "MDR_results_all_effects.rds"))
+
+    edge_coef_all <- purrr::map_dfr(mdr_results, "edge_coef")
+    edge_summary_all <- purrr::map_dfr(mdr_results, "edge_summary")
+    log_msg(
+        "Combined MDR outputs: edge coefficients = ", nrow(edge_coef_all),
+        " rows; edge summaries = ", nrow(edge_summary_all), " rows"
     )
-}
 
-mdr_effect_vars <- unique(selected_links$effect_var)
-log_msg("MDR effect plan: ", length(mdr_effect_vars), " effect variable(s): ", paste(mdr_effect_vars, collapse = ", "))
-mdr_results <- purrr::map(seq_along(mdr_effect_vars), function(i) {
-    effect_var <- mdr_effect_vars[[i]]
-    run_mdr_for_effect(
-        effect_var = effect_var,
-        selected_links = selected_links,
-        df_model = df_model,
-        df_log = df_log,
-        config = config,
-        paths = paths,
-        effect_id = i,
-        total_effects = length(mdr_effect_vars)
+    # Join UIC information onto MDR summary.
+    log_msg("Joining UIC information onto MDR summary")
+    edge_summary_all <- edge_summary_all %>%
+        left_join(
+            selected_links %>%
+                select(
+                    effect_var, cause_var, E, tp, ete,
+                    q95_global, p_global
+                ),
+            by = c("effect_var", "cause_var")
+        ) %>%
+        rename(
+            uic_E = E,
+            uic_tp_selected = tp,
+            uic_ete = ete,
+            uic_q95_global = q95_global,
+            uic_p_global = p_global
+        ) %>%
+        arrange(.data$effect_var, .data$cause_var)
+
+    edge_coef_all_path <- file.path(paths$tables, "Figure5_MDR_coefficients_long.csv")
+    edge_summary_all_path <- file.path(paths$tables, "Table_MDR_edge_summary.csv")
+    save_csv(edge_coef_all, edge_coef_all_path)
+    save_csv(edge_summary_all, edge_summary_all_path)
+    log_msg("Saved combined MDR coefficient and summary tables")
+    log_progress(
+        "mdr_combined_tables_saved",
+        "all_effects",
+        paste0(nrow(edge_coef_all), " coefficient rows; ", nrow(edge_summary_all), " summary rows"),
+        edge_summary_all_path
     )
-})
-names(mdr_results) <- mdr_effect_vars
-mdr_results <- purrr::compact(mdr_results)
-if (length(mdr_results) == 0) {
-    stop("No MDR S-map results were generated. Inspect selected UIC links and MDR logs.", call. = FALSE)
-}
-save_rds(mdr_results, file.path(paths$mdr_tables, "MDR_results_all_effects.rds"))
-log_msg("Saved all MDR results RDS: ", file.path(paths$mdr_tables, "MDR_results_all_effects.rds"))
 
-edge_coef_all <- purrr::map_dfr(mdr_results, "edge_coef")
-edge_summary_all <- purrr::map_dfr(mdr_results, "edge_summary")
-log_msg(
-    "Combined MDR outputs: edge coefficients = ", nrow(edge_coef_all),
-    " rows; edge summaries = ", nrow(edge_summary_all), " rows"
-)
+    # Compatibility export for downstream figure scripts. This does not overwrite old result folders.
+    log_msg("Creating wide MDR coefficient export for downstream Figure 5 scripts")
+    coef_wide <- edge_coef_all %>%
+        mutate(edge_col = paste0(.data$cause_var, "_cause_", .data$effect_var)) %>%
+        group_by(.data$edge_col) %>%
+        mutate(row_id = row_number()) %>%
+        ungroup() %>%
+        select(row_id, edge_col, coef_value) %>%
+        pivot_wider(names_from = edge_col, values_from = coef_value) %>%
+        select(-row_id)
+    coef_wide_path <- file.path(paths$tables, "MDR_coefficients_all_wide_for_Figure5.csv")
+    save_csv(coef_wide, coef_wide_path)
+    log_msg("Saved wide MDR coefficient table: ", coef_wide_path)
+    log_progress("mdr_wide_coefficients_saved", "all_effects", paste0(ncol(coef_wide), " edge columns"), coef_wide_path)
 
-# Join UIC information onto MDR summary.
-log_msg("Joining UIC information onto MDR summary")
-edge_summary_all <- edge_summary_all %>%
-    left_join(
-        selected_links %>%
-            select(
-                effect_var, cause_var, E, tp, ete,
-                q95_global, p_global
+    # -----------------------------
+    # 7. Manuscript-ready figures
+    # -----------------------------
+    log_section("7. Manuscript-ready figures")
+
+    log_msg("Building Figure 5 coefficient distribution plot")
+    fig5 <- edge_coef_all %>%
+        mutate(edge = forcats::fct_reorder(.data$edge, .data$coef_value, .fun = median, na.rm = TRUE, .na_rm = TRUE)) %>%
+        ggplot(aes(x = .data$edge, y = .data$coef_value)) +
+        geom_hline(yintercept = 0, linetype = "dashed") +
+        geom_violin(alpha = 0.45, trim = FALSE, na.rm = TRUE) +
+        geom_boxplot(width = 0.18, outlier.shape = NA, alpha = 0.75, na.rm = TRUE) +
+        ggforce::geom_sina(alpha = 0.35, size = 0.8, na.rm = TRUE) +
+        coord_flip() +
+        labs(
+            title = "Figure 5. MDR S-map coefficients for no-FDR UIC-selected subtype interactions",
+            x = NULL,
+            y = "MDR S-map coefficient on log(x+1) scale"
+        ) +
+        theme_pub(14)
+
+    ggsave(file.path(paths$fig, "Figure5_MDR_Smap_coefficients.tiff"), fig5,
+        width = 10, height = max(5, 1.5 + length(unique(edge_coef_all$edge)) * 1.0),
+        dpi = config$dpi, compression = "lzw"
+    )
+    log_msg("Saved Figure 5: ", file.path(paths$fig, "Figure5_MDR_Smap_coefficients.tiff"))
+
+    # Figure 4 network summary.
+    log_msg("Building Figure 4 network summary")
+    coords <- tibble(
+        node = c("B", "A_H1N1", "A_H3N2"),
+        x = c(0, -1, 1),
+        y = c(1, 0, 0)
+    )
+
+    edges_net <- edge_summary_all %>%
+        left_join(coords, by = c("cause_var" = "node")) %>%
+        rename(x0 = x, y0 = y) %>%
+        left_join(coords, by = c("effect_var" = "node")) %>%
+        rename(x1 = x, y1 = y) %>%
+        mutate(
+            label = paste0("lag ", .data$lag_weeks, " wk\n", sprintf("median %.3f", .data$coef_median)),
+            abs_coef = abs(.data$coef_median)
+        )
+    abs_rng <- range(edges_net$abs_coef, na.rm = TRUE)
+    if (!all(is.finite(abs_rng)) || abs_rng[1] == abs_rng[2]) {
+        edges_net$line_width <- 1.5
+    } else {
+        edges_net$line_width <- scales::rescale(edges_net$abs_coef, to = c(0.5, 2.6), from = abs_rng)
+    }
+
+    save_csv(edges_net, file.path(paths$tables, "Figure4_network_edges_MDR.csv"))
+    log_msg("Saved Figure 4 edge data: ", file.path(paths$tables, "Figure4_network_edges_MDR.csv"))
+
+    fig4 <- ggplot() +
+        geom_segment(
+            data = edges_net,
+            aes(
+                x = .data$x0, y = .data$y0, xend = .data$x1, yend = .data$y1,
+                linewidth = .data$line_width, linetype = .data$polarity
             ),
-        by = c("effect_var", "cause_var")
-    ) %>%
-    rename(
-        uic_E = E,
-        uic_tp_selected = tp,
-        uic_ete = ete,
-        uic_q95_global = q95_global,
-        uic_p_global = p_global
-    ) %>%
-    arrange(.data$effect_var, .data$cause_var)
+            arrow = grid::arrow(length = unit(0.22, "cm"), type = "closed"),
+            alpha = 0.8
+        ) +
+        geom_point(data = coords, aes(x = .data$x, y = .data$y), size = 16, shape = 21, fill = "white") +
+        geom_text(data = coords, aes(x = .data$x, y = .data$y, label = subtype_label(.data$node)), size = 5, fontface = "bold") +
+        geom_text(data = edges_net, aes(x = (.data$x0 + .data$x1) / 2, y = (.data$y0 + .data$y1) / 2 + 0.08, label = .data$label), size = 3.4) +
+        scale_linewidth_identity() +
+        coord_equal(xlim = c(-1.6, 1.6), ylim = c(-0.25, 1.25)) +
+        labs(
+            title = "Figure 4. Directional subtype interaction network from no-FDR UIC and MDR S-map",
+            linetype = "median coefficient"
+        ) +
+        theme_void(base_size = 14) +
+        theme(plot.title = element_text(face = "bold", hjust = 0.5), legend.position = "bottom")
 
-edge_coef_all_path <- file.path(paths$tables, "Figure5_MDR_coefficients_long.csv")
-edge_summary_all_path <- file.path(paths$tables, "Table_MDR_edge_summary.csv")
-save_csv(edge_coef_all, edge_coef_all_path)
-save_csv(edge_summary_all, edge_summary_all_path)
-log_msg("Saved combined MDR coefficient and summary tables")
-log_progress(
-    "mdr_combined_tables_saved",
-    "all_effects",
-    paste0(nrow(edge_coef_all), " coefficient rows; ", nrow(edge_summary_all), " summary rows"),
-    edge_summary_all_path
-)
-
-# Compatibility export for downstream figure scripts. This does not overwrite old result folders.
-log_msg("Creating wide MDR coefficient export for downstream Figure 5 scripts")
-coef_wide <- edge_coef_all %>%
-    mutate(edge_col = paste0(.data$cause_var, "_cause_", .data$effect_var)) %>%
-    group_by(.data$edge_col) %>%
-    mutate(row_id = row_number()) %>%
-    ungroup() %>%
-    select(row_id, edge_col, coef_value) %>%
-    pivot_wider(names_from = edge_col, values_from = coef_value) %>%
-    select(-row_id)
-coef_wide_path <- file.path(paths$tables, "MDR_coefficients_all_wide_for_Figure5.csv")
-save_csv(coef_wide, coef_wide_path)
-log_msg("Saved wide MDR coefficient table: ", coef_wide_path)
-log_progress("mdr_wide_coefficients_saved", "all_effects", paste0(ncol(coef_wide), " edge columns"), coef_wide_path)
-
-# -----------------------------
-# 7. Manuscript-ready figures
-# -----------------------------
-log_section("7. Manuscript-ready figures")
-
-log_msg("Building Figure 5 coefficient distribution plot")
-fig5 <- edge_coef_all %>%
-    mutate(edge = forcats::fct_reorder(.data$edge, .data$coef_value, .fun = median, na.rm = TRUE, .na_rm = TRUE)) %>%
-    ggplot(aes(x = .data$edge, y = .data$coef_value)) +
-    geom_hline(yintercept = 0, linetype = "dashed") +
-    geom_violin(alpha = 0.45, trim = FALSE, na.rm = TRUE) +
-    geom_boxplot(width = 0.18, outlier.shape = NA, alpha = 0.75, na.rm = TRUE) +
-    ggforce::geom_sina(alpha = 0.35, size = 0.8, na.rm = TRUE) +
-    coord_flip() +
-    labs(
-        title = "Figure 5. MDR S-map coefficients for no-FDR UIC-selected subtype interactions",
-        x = NULL,
-        y = "MDR S-map coefficient on log(x+1) scale"
-    ) +
-    theme_pub(14)
-
-ggsave(file.path(paths$fig, "Figure5_MDR_Smap_coefficients.tiff"), fig5,
-    width = 10, height = max(5, 1.5 + length(unique(edge_coef_all$edge)) * 1.0),
-    dpi = config$dpi, compression = "lzw"
-)
-log_msg("Saved Figure 5: ", file.path(paths$fig, "Figure5_MDR_Smap_coefficients.tiff"))
-
-# Figure 4 network summary.
-log_msg("Building Figure 4 network summary")
-coords <- tibble(
-    node = c("B", "A_H1N1", "A_H3N2"),
-    x = c(0, -1, 1),
-    y = c(1, 0, 0)
-)
-
-edges_net <- edge_summary_all %>%
-    left_join(coords, by = c("cause_var" = "node")) %>%
-    rename(x0 = x, y0 = y) %>%
-    left_join(coords, by = c("effect_var" = "node")) %>%
-    rename(x1 = x, y1 = y) %>%
-    mutate(
-        label = paste0("lag ", .data$lag_weeks, " wk\n", sprintf("median %.3f", .data$coef_median)),
-        abs_coef = abs(.data$coef_median)
+    ggsave(file.path(paths$fig, "Figure4_UIC_MDR_network.tiff"), fig4,
+        width = 8, height = 6, dpi = config$dpi, compression = "lzw"
     )
-abs_rng <- range(edges_net$abs_coef, na.rm = TRUE)
-if (!all(is.finite(abs_rng)) || abs_rng[1] == abs_rng[2]) {
-    edges_net$line_width <- 1.5
-} else {
-    edges_net$line_width <- scales::rescale(edges_net$abs_coef, to = c(0.5, 2.6), from = abs_rng)
-}
+    log_msg("Saved Figure 4: ", file.path(paths$fig, "Figure4_UIC_MDR_network.tiff"))
 
-save_csv(edges_net, file.path(paths$tables, "Figure4_network_edges_MDR.csv"))
-log_msg("Saved Figure 4 edge data: ", file.path(paths$tables, "Figure4_network_edges_MDR.csv"))
+    # -----------------------------
+    # 8. Manuscript-ready tables and text snippets
+    # -----------------------------
+    log_section("8. Manuscript-ready tables and text snippets")
 
-fig4 <- ggplot() +
-    geom_segment(
-        data = edges_net,
-        aes(
-            x = .data$x0, y = .data$y0, xend = .data$x1, yend = .data$y1,
-            linewidth = .data$line_width, linetype = .data$polarity
+    log_msg("Building manuscript-ready main results table")
+    table_main <- edge_summary_all %>%
+        transmute(
+            Cause = subtype_label(.data$cause_var),
+            Effect = subtype_label(.data$effect_var),
+            `UIC lag, weeks` = .data$lag_weeks,
+            `UIC E` = .data$uic_E,
+            `UIC ETE` = round(.data$uic_ete, 4),
+            `UIC global p` = signif(.data$uic_p_global, 3),
+            `MDR theta` = signif(.data$theta, 3),
+            `MDR rho` = signif(.data$rho, 3),
+            `MDR RMSE` = signif(.data$rmse, 3),
+            `Mean MDR coef` = round(.data$coef_mean, 4),
+            `Median MDR coef` = round(.data$coef_median, 4),
+            `IQR` = paste0(round(.data$coef_q25, 4), " to ", round(.data$coef_q75, 4)),
+            `Positive proportion` = round(.data$prop_positive, 3),
+            Polarity = .data$polarity
+        )
+
+    table_main_path <- file.path(paths$tables, "Table1_UIC_MDR_main_results_noFDR.csv")
+    save_csv(table_main, table_main_path)
+    log_msg("Saved Table 1 main results: ", table_main_path)
+    log_progress("manuscript_table_saved", "Table1", paste0(nrow(table_main), " rows"), table_main_path)
+    print(table_main)
+
+    methods_text <- c(
+        "Suggested Methods replacement for the S-map paragraph:",
+        "",
+        paste0(
+            "Interaction strength and polarity were estimated using multiview-distance S-map (MDR S-map). ",
+            "For each effect subtype, UIC was first performed across the remaining subtypes over lags of ",
+            paste(range(config$tp_range), collapse = " to "),
+            " using rUIC::uic.optimal(), which selects an embedding dimension before returning lag-wise UIC values. ",
+            "UIC links were retained for MDR S-map only when the observed effective transfer entropy exceeded ",
+            "the 95th percentile of the 52-week seasonal surrogate max-statistic distribution and the empirical ",
+            "global empirical surrogate p-value was below the prespecified alpha threshold without Benjamini-Hochberg/FDR correction. ",
+            "The retained UIC links were then used to build the MDR block with make_block_mvd(). Because the MDR S-map ",
+            "was fitted as a one-step map, UIC tp values were adjusted by +1 in the block construction so that a selected ",
+            "UIC lag of k weeks was represented as the local coefficient of the cause at t-k+1 for the prediction of the ",
+            "effect at t+1. Multiview distances were calculated using compute_mvd() with E = ", config$mdr_E,
+            ", n_ssr = ", config$n_ssr, ", and k = ", config$k,
+            ". The S-map weighting parameter theta was selected by minimizing RMSE over the prespecified grid. ",
+            "MDR S-map coefficients were interpreted on the log(x+1)-transformed incidence scale."
         ),
-        arrow = grid::arrow(length = unit(0.22, "cm"), type = "closed"),
-        alpha = 0.8
-    ) +
-    geom_point(data = coords, aes(x = .data$x, y = .data$y), size = 16, shape = 21, fill = "white") +
-    geom_text(data = coords, aes(x = .data$x, y = .data$y, label = subtype_label(.data$node)), size = 5, fontface = "bold") +
-    geom_text(data = edges_net, aes(x = (.data$x0 + .data$x1) / 2, y = (.data$y0 + .data$y1) / 2 + 0.08, label = .data$label), size = 3.4) +
-    scale_linewidth_identity() +
-    coord_equal(xlim = c(-1.6, 1.6), ylim = c(-0.25, 1.25)) +
-    labs(
-        title = "Figure 4. Directional subtype interaction network from no-FDR UIC and MDR S-map",
-        linetype = "median coefficient"
-    ) +
-    theme_void(base_size = 14) +
-    theme(plot.title = element_text(face = "bold", hjust = 0.5), legend.position = "bottom")
-
-ggsave(file.path(paths$fig, "Figure4_UIC_MDR_network.tiff"), fig4,
-    width = 8, height = 6, dpi = config$dpi, compression = "lzw"
-)
-log_msg("Saved Figure 4: ", file.path(paths$fig, "Figure4_UIC_MDR_network.tiff"))
-
-# -----------------------------
-# 8. Manuscript-ready tables and text snippets
-# -----------------------------
-log_section("8. Manuscript-ready tables and text snippets")
-
-log_msg("Building manuscript-ready main results table")
-table_main <- edge_summary_all %>%
-    transmute(
-        Cause = subtype_label(.data$cause_var),
-        Effect = subtype_label(.data$effect_var),
-        `UIC lag, weeks` = .data$lag_weeks,
-        `UIC E` = .data$uic_E,
-        `UIC ETE` = round(.data$uic_ete, 4),
-        `UIC global p` = signif(.data$uic_p_global, 3),
-        `MDR theta` = signif(.data$theta, 3),
-        `MDR rho` = signif(.data$rho, 3),
-        `MDR RMSE` = signif(.data$rmse, 3),
-        `Mean MDR coef` = round(.data$coef_mean, 4),
-        `Median MDR coef` = round(.data$coef_median, 4),
-        `IQR` = paste0(round(.data$coef_q25, 4), " to ", round(.data$coef_q75, 4)),
-        `Positive proportion` = round(.data$prop_positive, 3),
-        Polarity = .data$polarity
+        "",
+        "Suggested Figure 5 legend:",
+        "Figure 5. Time-varying MDR S-map coefficients for UIC-selected subtype interactions. Coefficients quantify the local effect of the cause subtype on the subsequent dynamics of the effect subtype at the UIC-selected lag, on the log(x+1)-transformed scale. Violin plots show the full empirical distribution, boxes show the interquartile range and median, and the dashed horizontal line indicates zero.",
+        "",
+        "Suggested Results table is exported as tables/Table1_UIC_MDR_main_results_noFDR.csv. Replace numerical values in the manuscript after running the script on the final dataset."
     )
-
-table_main_path <- file.path(paths$tables, "Table1_UIC_MDR_main_results_noFDR.csv")
-save_csv(table_main, table_main_path)
-log_msg("Saved Table 1 main results: ", table_main_path)
-log_progress("manuscript_table_saved", "Table1", paste0(nrow(table_main), " rows"), table_main_path)
-print(table_main)
-
-methods_text <- c(
-    "Suggested Methods replacement for the S-map paragraph:",
-    "",
-    paste0(
-        "Interaction strength and polarity were estimated using multiview-distance S-map (MDR S-map). ",
-        "For each effect subtype, UIC was first performed across the remaining subtypes over lags of ",
-        paste(range(config$tp_range), collapse = " to "),
-        " using rUIC::uic.optimal(), which selects an embedding dimension before returning lag-wise UIC values. ",
-        "UIC links were retained for MDR S-map only when the observed effective transfer entropy exceeded ",
-        "the 95th percentile of the 52-week seasonal surrogate max-statistic distribution and the empirical ",
-        "global empirical surrogate p-value was below the prespecified alpha threshold without Benjamini-Hochberg/FDR correction. ",
-        "The retained UIC links were then used to build the MDR block with make_block_mvd(). Because the MDR S-map ",
-        "was fitted as a one-step map, UIC tp values were adjusted by +1 in the block construction so that a selected ",
-        "UIC lag of k weeks was represented as the local coefficient of the cause at t-k+1 for the prediction of the ",
-        "effect at t+1. Multiview distances were calculated using compute_mvd() with E = ", config$mdr_E,
-        ", n_ssr = ", config$n_ssr, ", and k = ", config$k,
-        ". The S-map weighting parameter theta was selected by minimizing RMSE over the prespecified grid. ",
-        "MDR S-map coefficients were interpreted on the log(x+1)-transformed incidence scale."
-    ),
-    "",
-    "Suggested Figure 5 legend:",
-    "Figure 5. Time-varying MDR S-map coefficients for UIC-selected subtype interactions. Coefficients quantify the local effect of the cause subtype on the subsequent dynamics of the effect subtype at the UIC-selected lag, on the log(x+1)-transformed scale. Violin plots show the full empirical distribution, boxes show the interquartile range and median, and the dashed horizontal line indicates zero.",
-    "",
-    "Suggested Results table is exported as tables/Table1_UIC_MDR_main_results_noFDR.csv. Replace numerical values in the manuscript after running the script on the final dataset."
-)
-writeLines(methods_text, file.path(paths$manuscript, "MDR_methods_results_figure_legend_text.txt"))
-log_msg("Saved manuscript text snippets: ", file.path(paths$manuscript, "MDR_methods_results_figure_legend_text.txt"))
-
+    writeLines(methods_text, file.path(paths$manuscript, "MDR_methods_results_figure_legend_text.txt"))
+    log_msg("Saved manuscript text snippets: ", file.path(paths$manuscript, "MDR_methods_results_figure_legend_text.txt"))
 }
 
 # -----------------------------
