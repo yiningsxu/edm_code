@@ -672,6 +672,15 @@ read_prepare_flu <- function(data_file, subtype_vars) {
         min(raw$Date, na.rm = TRUE), " to ", max(raw$Date, na.rm = TRUE)
     )
 
+    if (anyDuplicated(raw$Date)) {
+        stop("Duplicated ISO-week dates detected.", call. = FALSE)
+    }
+
+    date_gap <- diff(raw$Date)
+    if (any(date_gap != 7)) {
+        stop("Weekly time series has missing or irregular weeks.", call. = FALSE)
+    }
+
     out <- data.frame(Date = raw$Date)
 
     for (v in subtype_vars) {
