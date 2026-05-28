@@ -167,6 +167,7 @@ config <- list(
   tau = 1, # 予測ステップ数（デフォルトは1, 1週間刻みでラグを取る）
   alpha = 0.05, # 有意水準
   num_surr = 2000, # サロゲートデータの数
+  save_every_surr = 1, # サロゲート解析の途中経過を保存する間隔
   season_period = 52, # 季節周期（季節周期を 52 週に設定、単位はステップ数、日本でのインフルエンザシーズンを考慮）
   random_seed = 1234, # 乱数シード
 
@@ -204,7 +205,11 @@ safe_dir <- function(path) {
 paths <- list(
   root = safe_dir(config$out_dir),
   tables = safe_dir(file.path(config$out_dir, "tables")),
+  checkpoints = safe_dir(file.path(config$out_dir, "checkpoints")),
+  progress = safe_dir(file.path(config$out_dir, "progress")),
   uic_tables = safe_dir(file.path(config$out_dir, "tables", "uic")),
+  uic_surrogate_runs = safe_dir(file.path(config$out_dir, "tables", "uic", "surrogate_runs")),
+  uic_surrogate_series = safe_dir(file.path(config$out_dir, "tables", "uic", "surrogate_series")),
   mdr_tables = safe_dir(file.path(config$out_dir, "tables", "mdr_smap")),
   fig = safe_dir(file.path(config$out_dir, "figures")),
   uic_fig = safe_dir(file.path(config$out_dir, "figures", "uic")),
@@ -213,14 +218,47 @@ paths <- list(
 )
 
 save_csv <- function(x, path) {
+  dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
   readr::write_csv(x, path, na = "")
   invisible(path)
 }
 
 save_rds <- function(x, path) {
+  dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
   saveRDS(x, path)
   invisible(path)
 }
+
+append_csv <- function(x, path) {
+  dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
+  append <- file.exists(path)
+  readr::write_csv(x, path, na = "", append = append, col_names = !append)
+  invisible(path)
+}
+
+reset_output_file <- function(path) {
+  if (file.exists(path)) {
+    file.remove(path)
+  }
+  invisible(path)
+}
+
+log_progress <- function(stage, tag = NA_character_, detail = NA_character_, path = NA_character_) {
+  append_csv(
+    tibble(
+      timestamp = format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
+      stage = stage,
+      tag = tag,
+      detail = detail,
+      path = path
+    ),
+    file.path(paths$progress, "progress_log.csv")
+  )
+}
+
+reset_output_file(file.path(paths$progress, "progress_log.csv"))
+save_rds(list(config = config, paths = paths), file.path(paths$root, "run_config_and_paths.rds"))
+log_progress("start", "pipeline", "run configuration saved", file.path(paths$root, "run_config_and_paths.rds"))
 
 subtype_label <- function(x) {
   dplyr::recode(x,
@@ -317,7 +355,9 @@ df_log <- read_prepare_flu(config$data_file, config$subtype_vars)
 df_model <- df_log %>% select(-Date)
 vars <- names(df_model)
 
-save_csv(df_log, file.path(paths$tables, "prepared_log1p_timeseries.csv"))
+prepared_path <- file.path(paths$tables, "prepared_log1p_timeseries.csv")
+save_csv(df_log, prepared_path)
+log_progress("saved", "prepared_data", "log1p-transformed time series", prepared_path)
 
 # -----------------------------
 # 4. Seasonal surrogate for weekly data
@@ -350,6 +390,7 @@ make_seasonal_surrogates <- function(ts, num_surr, period = 52, seed = NULL) {
 # -----------------------------
 run_uic_pair <- function(df_model, effect_var, cause_var, config, paths) {
   message("UIC: ", cause_var, " -> ", effect_var)
+  tag <- paste0(cause_var, "_to_", effect_var)
 
   obs <- rUIC::uic.optimal(
     df_model,
@@ -373,6 +414,9 @@ run_uic_pair <- function(df_model, effect_var, cause_var, config, paths) {
   if (!("pval" %in% names(obs))) {
     obs <- obs %>% mutate(pval = NA_real_)
   }
+  observed_path <- file.path(paths$uic_tables, paste0(tag, "_observed_uic.csv"))
+  save_csv(obs, observed_path)
+  log_progress("saved", tag, "observed UIC result", observed_path)
 
   effect_surr <- make_seasonal_surrogates(
     df_model[[effect_var]],
@@ -380,10 +424,23 @@ run_uic_pair <- function(df_model, effect_var, cause_var, config, paths) {
     period = config$season_period,
     seed = config$random_seed
   )
+  surrogate_series_path <- file.path(paths$uic_surrogate_series, paste0(tag, "_seasonal_surrogate_series.csv"))
+  save_csv(
+    as_tibble(effect_surr) %>%
+      mutate(time_index = row_number()) %>%
+      relocate(time_index),
+    surrogate_series_path
+  )
+  log_progress("saved", tag, "seasonal surrogate time series", surrogate_series_path)
 
   surr_ete <- matrix(NA_real_, nrow = nrow(obs), ncol = config$num_surr)
   rownames(surr_ete) <- paste0("tp_", obs$tp)
   colnames(surr_ete) <- paste0("surr_", seq_len(config$num_surr))
+
+  surrogate_run_path <- file.path(paths$uic_surrogate_runs, paste0(tag, "_surrogate_uic_long.csv"))
+  surrogate_checkpoint_path <- file.path(paths$checkpoints, paste0(tag, "_uic_surrogate_progress.rds"))
+  reset_output_file(surrogate_run_path)
+  reset_output_file(surrogate_checkpoint_path)
 
   for (i in seq_len(config$num_surr)) {
     tmp <- data.frame(effect = effect_surr[, i], cause = df_model[[cause_var]])
@@ -396,9 +453,47 @@ run_uic_pair <- function(df_model, effect_var, cause_var, config, paths) {
       tp = config$tp_range,
       alpha = config$alpha
     ) %>%
-      as_tibble() %>%
-      select(tp, ete)
+      as_tibble()
+    if (!("ete" %in% names(sres))) {
+      stop("rUIC::uic.optimal() surrogate output does not include 'ete'.", call. = FALSE)
+    }
+    if (!("te" %in% names(sres))) {
+      sres <- sres %>% mutate(te = .data$ete)
+    }
+
+    append_csv(
+      sres %>%
+        mutate(
+          surrogate_id = i,
+          surrogate_col = colnames(effect_surr)[i],
+          effect_var = effect_var,
+          cause_var = cause_var,
+          .before = 1
+        ),
+      surrogate_run_path
+    )
     surr_ete[, i] <- sres$ete[match(obs$tp, sres$tp)]
+
+    if (i == 1 || i %% config$save_every_surr == 0 || i == config$num_surr) {
+      save_rds(
+        list(
+          effect_var = effect_var,
+          cause_var = cause_var,
+          completed_surrogates = i,
+          observed_uic = obs,
+          surrogate_ete = surr_ete[, seq_len(i), drop = FALSE],
+          surrogate_uic_long_csv = surrogate_run_path
+        ),
+        surrogate_checkpoint_path
+      )
+      log_progress(
+        "checkpoint",
+        tag,
+        paste0("completed surrogate ", i, "/", config$num_surr),
+        surrogate_checkpoint_path
+      )
+      message("  saved surrogate progress: ", tag, " ", i, "/", config$num_surr)
+    }
   }
 
   qfun <- function(x, p) as.numeric(quantile(x, probs = p, na.rm = TRUE, names = FALSE))
@@ -432,9 +527,12 @@ run_uic_pair <- function(df_model, effect_var, cause_var, config, paths) {
       sig_global = .data$p_global < config$alpha & .data$ete > .data$q95_global
     )
 
-  tag <- paste0(cause_var, "_to_", effect_var)
-  save_csv(res, file.path(paths$uic_tables, paste0(tag, "_uic_surrogate_corrected.csv")))
-  save_csv(as.data.frame(surr_ete), file.path(paths$uic_tables, paste0(tag, "_surrogate_ete_matrix.csv")))
+  corrected_path <- file.path(paths$uic_tables, paste0(tag, "_uic_surrogate_corrected.csv"))
+  surrogate_matrix_path <- file.path(paths$uic_tables, paste0(tag, "_surrogate_ete_matrix.csv"))
+  save_csv(res, corrected_path)
+  save_csv(as.data.frame(surr_ete), surrogate_matrix_path)
+  log_progress("saved", tag, "surrogate-corrected UIC result", corrected_path)
+  log_progress("saved", tag, "surrogate ETE matrix", surrogate_matrix_path)
 
   p <- ggplot(res, aes(x = .data$tp)) +
     geom_line(aes(y = .data$ete), linewidth = 0.6) +
@@ -472,7 +570,9 @@ uic_all <- uic_all %>%
     sig_primary = .data$p_global_fdr < config$alpha & .data$ete > .data$q95_global
   )
 
-save_csv(uic_all, file.path(paths$tables, "uic_all_pairs_surrogate_corrected.csv"))
+uic_all_path <- file.path(paths$tables, "uic_all_pairs_surrogate_corrected.csv")
+save_csv(uic_all, uic_all_path)
+log_progress("saved", "uic_all", "all-pair surrogate-corrected UIC with FDR", uic_all_path)
 
 selected_links <- uic_all %>%
   filter(.data$sig_primary, .data$tp < 0) %>%
@@ -488,7 +588,9 @@ selected_links <- uic_all %>%
     te = ifelse(is.na(.data$te), .data$ete, .data$te)
   )
 
-save_csv(selected_links, file.path(paths$tables, "uic_selected_links_for_MDR.csv"))
+selected_links_path <- file.path(paths$tables, "uic_selected_links_for_MDR.csv")
+save_csv(selected_links, selected_links_path)
+log_progress("saved", "selected_links", "UIC links selected for MDR", selected_links_path)
 
 if (nrow(selected_links) == 0) {
   stop("No UIC links passed the surrogate/FDR primary criterion. Inspect uic_all_pairs_surrogate_corrected.csv.", call. = FALSE)
@@ -647,6 +749,8 @@ run_mdr_for_effect <- function(effect_var, selected_links, df_model, df_log, con
     stringsAsFactors = FALSE
   )
 
+  param_search_path <- file.path(paths$mdr_tables, paste0(effect_var, "_MDR_parameter_search.csv"))
+  reset_output_file(param_search_path)
   param_res <- purrr::pmap_dfr(param_grid, function(theta, lambda) {
     fit <- s_map_mdr_compat(
       block_mvd = block_mvd,
@@ -659,11 +763,22 @@ run_mdr_for_effect <- function(effect_var, selected_links, df_model, df_log, con
       save_smap_coefficients = FALSE,
       random_seed = config$random_seed
     )
-    as_tibble(fit$stats) %>% mutate(theta = theta, lambda = lambda)
+    param_row <- as_tibble(fit$stats) %>%
+      mutate(theta = theta, lambda = lambda) %>%
+      select(any_of(c("N", "theta", "lambda", "rho", "mae", "rmse")), everything())
+    append_csv(param_row, param_search_path)
+    log_progress(
+      "saved",
+      effect_var,
+      paste0("MDR parameter search theta=", theta, ", lambda=", lambda),
+      param_search_path
+    )
+    param_row
   }) %>%
     select(any_of(c("N", "theta", "lambda", "rho", "mae", "rmse")), everything())
 
-  save_csv(param_res, file.path(paths$mdr_tables, paste0(effect_var, "_MDR_parameter_search.csv")))
+  save_csv(param_res, param_search_path)
+  log_progress("saved", effect_var, "complete MDR parameter search table", param_search_path)
 
   best <- param_res %>%
     filter(is.finite(.data$rmse)) %>%
@@ -1001,4 +1116,5 @@ cat("\nSession info:\n")
 print(sessionInfo())
 sink()
 
+log_progress("done", "pipeline", "all requested outputs written", paths$root)
 message("Done. Results written to: ", normalizePath(paths$root, winslash = "/", mustWork = FALSE))

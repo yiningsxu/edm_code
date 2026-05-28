@@ -419,7 +419,7 @@ config <- list(
   tau = env_int("FLU_SUBTYPE_TAU", 1), # 予測ステップ数（デフォルトは1, 1週間刻みでラグを取る）
   alpha = env_num("FLU_SUBTYPE_ALPHA", 0.05), # 有意水準
   num_surr = env_int("FLU_SUBTYPE_NUM_SURR", 2000), # 季節サロゲートデータの数
-  uic_internal_num_surr = env_int("FLU_SUBTYPE_UIC_INTERNAL_NUM_SURR", 1), # rUIC内部p値用。主判定には使わない
+  uic_internal_num_surr = env_int("FLU_SUBTYPE_UIC_INTERNAL_NUM_SURR", 1000), # rUIC内部p値用。主判定には使わない
   season_period = env_int("FLU_SUBTYPE_SEASON_PERIOD", 52), # 季節周期
   random_seed = env_int("FLU_SUBTYPE_RANDOM_SEED", 1234), # 乱数シード
   save_intermediate = env_logical("FLU_SUBTYPE_SAVE_INTERMEDIATE", TRUE), # 解析途中のcheckpoint保存
