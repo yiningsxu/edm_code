@@ -14,8 +14,9 @@
 # Notes:
 #   - Run with Rscript or source() from anywhere inside the edm_code workspace.
 #   - For a quick dry run, use environment variables such as
-#     FLU_SUBTYPE_NUM_SURR=10 FLU_SUBTYPE_N_SSR=50 FLU_SUBTYPE_E_RANGE=1:5.
+#     FLU_SUBTYPE_NUM_SURR=10 FLU_SUBTYPE_UIC_INTERNAL_NUM_SURR=10 FLU_SUBTYPE_N_SSR=50 FLU_SUBTYPE_E_RANGE=1:5.
 #   - MDR distance and S-map functions are taken from either macam or macamts.
+#   - This variant uses rUIC::uic.optimal() for UIC, not rUIC::uic() with lag-wise max-ETE E selection.
 
 rm(list = ls())
 
@@ -409,7 +410,7 @@ config <- list(
   data_file = env_chr("FLU_SUBTYPE_DATA_FILE", "data/FluSub_jp/FluSub_11to19_jp_per_20240925.csv"),
   out_dir = env_chr(
     "FLU_SUBTYPE_OUT_DIR",
-    file.path("result", "FluSub_JP", paste0(format(Sys.Date(), "%Y%m%d"), "_UIC_MDR_primary"))
+    file.path("result", "FluSub_JP", paste0(format(Sys.Date(), "%Y%m%d"), "_UICoptimal_MDR_primary"))
   ),
   subtype_vars = c("B", "A_H1N1", "A_H3N2"),
 
@@ -419,7 +420,7 @@ config <- list(
   tau = env_int("FLU_SUBTYPE_TAU", 1), # 予測ステップ数（デフォルトは1, 1週間刻みでラグを取る）
   alpha = env_num("FLU_SUBTYPE_ALPHA", 0.05), # 有意水準
   num_surr = env_int("FLU_SUBTYPE_NUM_SURR", 2000), # 季節サロゲートデータの数
-  uic_internal_num_surr = env_int("FLU_SUBTYPE_UIC_INTERNAL_NUM_SURR", 1000), # rUIC内部p値用。主判定には使わない
+  uic_internal_num_surr = env_int("FLU_SUBTYPE_UIC_INTERNAL_NUM_SURR", 1000), # rUIC::uic.optimal() 内部p値用。dry runでは小さくしてよい
   season_period = env_int("FLU_SUBTYPE_SEASON_PERIOD", 52), # 季節周期
   random_seed = env_int("FLU_SUBTYPE_RANDOM_SEED", 1234), # 乱数シード
   save_intermediate = env_logical("FLU_SUBTYPE_SAVE_INTERMEDIATE", TRUE), # 解析途中のcheckpoint保存
@@ -460,7 +461,7 @@ log_msg(
   "UIC settings: E = ", paste(range(config$E_range), collapse = "-"),
   ", tp = ", paste(range(config$tp_range), collapse = " to "),
   ", seasonal surrogates = ", config$num_surr,
-  ", rUIC internal surrogates = ", config$uic_internal_num_surr
+  ", rUIC uic.optimal internal surrogates = ", config$uic_internal_num_surr
 )
 log_msg(
   "Intermediate saving: save_intermediate = ", config$save_intermediate,
@@ -662,28 +663,69 @@ make_seasonal_surrogates <- function(ts, num_surr, period = 52, seed = NULL) {
 # -----------------------------
 log_section("5. UIC with seasonal surrogate correction")
 
-run_uic_grid <- function(block, lib_var, tar_var, E, tau, tp, num_surr = 1) {
-  out <- rUIC::uic(
-    as.data.frame(block),
+run_uic_optimal <- function(block, lib_var, tar_var, E, tau, tp, alpha, num_surr = 1000) {
+  # Use rUIC::uic.optimal() so that the embedding dimension is selected by
+  # the rUIC wrapper before lag-wise UIC values are returned. This avoids the
+  # previous behavior of computing all E x tp combinations with rUIC::uic()
+  # and then selecting the E with the maximum ETE separately for each tp.
+  f <- rUIC::uic.optimal
+  formal_names <- names(formals(f))
+
+  args <- list(as.data.frame(block))
+  named_args <- list(
     lib_var = lib_var,
     tar_var = tar_var,
     E = E,
     tau = tau,
     tp = tp,
-    num_surr = num_surr
-  ) %>%
-    as_tibble()
+    alpha = alpha,
+    num_surr = num_surr,
+    sequential_test = FALSE
+  )
+  named_args <- named_args[names(named_args) %in% formal_names]
 
+  out <- do.call(f, c(args, named_args)) %>%
+    as_tibble() %>%
+    dplyr::filter(.data$tp %in% .env$tp) %>%
+    dplyr::arrange(.data$tp)
+
+  if (!("tp" %in% names(out))) {
+    stop("rUIC::uic.optimal() output does not include 'tp'.", call. = FALSE)
+  }
   if (!("ete" %in% names(out))) {
-    stop("rUIC::uic() output does not include 'ete'.", call. = FALSE)
+    stop("rUIC::uic.optimal() output does not include 'ete'.", call. = FALSE)
+  }
+  if (!("te" %in% names(out))) {
+    out <- out %>% dplyr::mutate(te = .data$ete)
+  }
+  if (!("pval" %in% names(out))) {
+    out <- out %>% dplyr::mutate(pval = NA_real_)
+  }
+  if (!("E" %in% names(out))) {
+    out <- out %>% dplyr::mutate(E = NA_integer_)
   }
 
-  out %>%
-    dplyr::group_by(.data$tp) %>%
-    dplyr::arrange(dplyr::desc(.data$ete), .by_group = TRUE) %>%
-    dplyr::slice(1) %>%
-    dplyr::ungroup() %>%
-    dplyr::arrange(.data$tp)
+  expected_tp <- sort(unique(tp))
+  observed_tp <- sort(unique(out$tp))
+  missing_tp <- setdiff(expected_tp, observed_tp)
+  if (length(missing_tp) > 0) {
+    stop(
+      "rUIC::uic.optimal() did not return all requested tp values. Missing: ",
+      paste(missing_tp, collapse = ", "),
+      call. = FALSE
+    )
+  }
+
+  duplicate_tp <- unique(out$tp[duplicated(out$tp)])
+  if (length(duplicate_tp) > 0) {
+    stop(
+      "rUIC::uic.optimal() returned multiple rows for tp value(s): ",
+      paste(duplicate_tp, collapse = ", "),
+      call. = FALSE
+    )
+  }
+
+  out
 }
 
 run_uic_pair <- function(df_model, effect_var, cause_var, config, paths, pair_id = NULL, total_pairs = NULL) {
@@ -701,13 +743,14 @@ run_uic_pair <- function(df_model, effect_var, cause_var, config, paths, pair_id
     sprintf(paste0("%0", nchar(as.character(config$num_surr)), "d"), i)
   }
 
-  obs <- run_uic_grid(
+  obs <- run_uic_optimal(
     block = df_model,
     lib_var = effect_var,
     tar_var = cause_var,
     E = config$E_range,
     tau = config$tau,
     tp = config$tp_range,
+    alpha = config$alpha,
     num_surr = config$uic_internal_num_surr
   )
   log_msg(
@@ -716,7 +759,7 @@ run_uic_pair <- function(df_model, effect_var, cause_var, config, paths, pair_id
   )
 
   if (!("ete" %in% names(obs))) {
-    stop("rUIC::uic() output does not include 'ete'.", call. = FALSE)
+    stop("rUIC::uic.optimal() output does not include 'ete'.", call. = FALSE)
   }
   if (!("te" %in% names(obs))) {
     obs <- obs %>% mutate(te = .data$ete)
@@ -731,9 +774,15 @@ run_uic_pair <- function(df_model, effect_var, cause_var, config, paths, pair_id
   obs_best <- obs %>%
     arrange(desc(.data$ete)) %>%
     slice(1)
+  selected_E_values <- unique(stats::na.omit(obs$E))
+  selected_E_msg <- if (length(selected_E_values) == 1) {
+    as.character(selected_E_values[[1]])
+  } else {
+    paste(selected_E_values, collapse = ", ")
+  }
   log_msg(
-    "Observed best lag: tp = ", obs_best$tp[[1]],
-    ", E = ", obs_best$E[[1]],
+    "uic.optimal selected E = ", selected_E_msg,
+    "; observed best lag: tp = ", obs_best$tp[[1]],
     ", ete = ", signif(obs_best$ete[[1]], 4)
   )
 
@@ -759,20 +808,21 @@ run_uic_pair <- function(df_model, effect_var, cause_var, config, paths, pair_id
   rownames(surr_ete) <- paste0("tp_", obs$tp)
   colnames(surr_ete) <- paste0("surr_", seq_len(config$num_surr))
 
-  log_msg("Running surrogate UIC loop for ", cause_var, " -> ", effect_var)
+  log_msg("Running surrogate uic.optimal loop for ", cause_var, " -> ", effect_var)
   surr_progress <- progress_points(config$num_surr, n = 10)
   for (i in seq_len(config$num_surr)) {
     tmp <- data.frame(effect = effect_surr[, i], cause = df_model[[cause_var]])
-    sres <- run_uic_grid(
+    sres <- run_uic_optimal(
       block = tmp,
       lib_var = "effect",
       tar_var = "cause",
       E = config$E_range,
       tau = config$tau,
       tp = config$tp_range,
+      alpha = config$alpha,
       num_surr = config$uic_internal_num_surr
     ) %>%
-      dplyr::select(tp, ete)
+      dplyr::select(any_of(c("tp", "E", "te", "ete", "pval")))
     surr_ete[, i] <- sres$ete[match(obs$tp, sres$tp)]
     if (isTRUE(config$save_each_surrogate)) {
       sres_out <- sres %>%
@@ -1538,7 +1588,8 @@ methods_text <- c(
     "Interaction strength and polarity were estimated using multiview-distance S-map (MDR S-map). ",
     "For each effect subtype, UIC was first performed across the remaining subtypes over lags of ",
     paste(range(config$tp_range), collapse = " to "),
-    ". UIC links were retained for MDR S-map only when the observed effective transfer entropy exceeded ",
+    " using rUIC::uic.optimal(), which selects an embedding dimension before returning lag-wise UIC values. ",
+    "UIC links were retained for MDR S-map only when the observed effective transfer entropy exceeded ",
     "the 95th percentile of the 52-week seasonal surrogate max-statistic distribution and the empirical ",
     "surrogate p-value remained significant after Benjamini-Hochberg false-discovery-rate correction. ",
     "The retained UIC links were then used to build the MDR block with make_block_mvd(). Because the MDR S-map ",
