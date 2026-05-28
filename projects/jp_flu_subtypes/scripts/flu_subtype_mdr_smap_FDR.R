@@ -414,9 +414,9 @@ config <- list(
   ),
   subtype_vars = c("B", "A_H1N1", "A_H3N2"),
 
-  # UIC settings. Primary analysis excludes tp = 0 to avoid contemporaneous seasonal synchrony.
-  E_range = env_int_vector("FLU_SUBTYPE_E_RANGE", 1:20), # 埋め込み次元またはラグ数候補の範囲
-  tp_range = env_int_vector("FLU_SUBTYPE_TP_RANGE", -12:-1), # 予測ラグの範囲
+  # UIC settings.
+  E_range = env_int_vector("FLU_SUBTYPE_E_RANGE", 0:20), # 埋め込み次元またはラグ数候補の範囲
+  tp_range = env_int_vector("FLU_SUBTYPE_TP_RANGE", -12:0), # 予測ラグの範囲
   tau = env_int("FLU_SUBTYPE_TAU", 1), # 予測ステップ数（デフォルトは1, 1週間刻みでラグを取る）
   alpha = env_num("FLU_SUBTYPE_ALPHA", 0.05), # 有意水準
   num_surr = env_int("FLU_SUBTYPE_NUM_SURR", 2000), # 季節サロゲートデータの数
