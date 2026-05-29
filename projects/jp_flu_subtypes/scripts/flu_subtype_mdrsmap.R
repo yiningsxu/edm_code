@@ -678,7 +678,9 @@ read_prepare_flu <- function(data_file, subtype_vars) {
 
     date_gap <- diff(raw$Date)
     if (any(date_gap != 7)) {
-        stop("Weekly time series has missing or irregular weeks.", call. = FALSE)
+        log_msg("Weekly time series has missing or irregular weeks: gaps of ",
+                paste(unique(date_gap[date_gap != 7]), collapse = ", "),
+                " days detected.", level = "WARN")
     }
 
     out <- data.frame(Date = raw$Date)
@@ -1349,7 +1351,7 @@ if (analysis_has_mdr_links) {
         log_msg("MDR S-map started: ", effect_prefix, "effect = ", effect_var)
         log_progress("mdr_effect_started", effect_var, paste0(effect_prefix, "effect = ", effect_var))
 
-        links_eff <- selected_links %>% filter(.data$effect_var == effect_var)
+        links_eff <- selected_links %>% filter(.data$effect_var == .env$effect_var)
         if (nrow(links_eff) == 0) {
             log_msg("No selected UIC links for effect = ", effect_var, "; skipping MDR", level = "WARN")
             log_progress("mdr_effect_skipped", effect_var, "No selected UIC links")

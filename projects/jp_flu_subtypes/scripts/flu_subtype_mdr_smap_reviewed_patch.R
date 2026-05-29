@@ -658,7 +658,7 @@ pred_dates <- function(pred_df, df_log) {
 run_mdr_for_effect <- function(effect_var, selected_links, df_model, df_log, config, paths) {
   message("MDR S-map for effect: ", effect_var)
 
-  links_eff <- selected_links %>% filter(.data$effect_var == effect_var)
+  links_eff <- selected_links %>% filter(.data$effect_var == .env$effect_var)
   if (nrow(links_eff) == 0) {
     return(NULL)
   }

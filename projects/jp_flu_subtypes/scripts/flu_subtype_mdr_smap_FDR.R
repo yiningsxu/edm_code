@@ -1076,7 +1076,7 @@ run_mdr_for_effect <- function(effect_var, selected_links, df_model, df_log, con
   }
   log_msg("MDR S-map started: ", effect_prefix, "effect = ", effect_var)
 
-  links_eff <- selected_links %>% filter(.data$effect_var == effect_var)
+  links_eff <- selected_links %>% filter(.data$effect_var == .env$effect_var)
   if (nrow(links_eff) == 0) {
     log_msg("No selected UIC links for effect = ", effect_var, "; skipping MDR", level = "WARN")
     return(NULL)
